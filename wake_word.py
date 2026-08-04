@@ -27,7 +27,7 @@ import numpy as np
 import pyaudio
 
 import config
-from voice_id.verify import is_my_voice, voiceprint_available
+from voice_id.verify import voice_similarity, voiceprint_available
 
 FRAME_SAMPLES = 1280  # 80ms @ 16kHz — openWakeWord's native frame size
 
@@ -85,20 +85,34 @@ class WakeWordListener:
                 frame = np.frombuffer(raw, dtype=np.int16)
 
                 prediction = self._model.predict(frame)
-                score = prediction.get(config.WAKE_WORD_MODEL, 0.0)
+                ww_score = prediction.get(config.WAKE_WORD_MODEL, 0.0)
 
-                if score < config.WAKE_WORD_THRESHOLD:
+                if ww_score < config.WAKE_WORD_THRESHOLD:
                     continue
 
                 if self._voice_id_enabled:
                     clip = b"".join(ring)
-                    if not is_my_voice(clip):
-                        print('[wake_word] heard "hey jarvis" but voice didn\'t match — ignoring')
+                    voice_score = voice_similarity(clip)
+                    if voice_score is None:
+                        print('[wake_word] heard "hey jarvis" but clip was too short to verify — ignoring')
                         continue
+                    if voice_score < config.VOICE_MATCH_THRESHOLD:
+                        print(f'[wake_word] heard "hey jarvis" (voice match {voice_score:.2f}, need >= {config.VOICE_MATCH_THRESHOLD}) — ignoring')
+                        self._drain(stream, seconds=1.0)  # skip past the rest of this utterance instead of re-triggering on its tail
+                        continue
+                    print(f"[wake_word] voice match {voice_score:.2f} — confirmed")
 
                 return "hey jarvis"
         finally:
             stream.close()
+
+    def _drain(self, stream, seconds: float):
+        """Reads and discards audio for `seconds` — used to skip past the
+        tail of an utterance we just rejected/handled so it doesn't
+        immediately re-trigger the wake word loop."""
+        frames_to_drain = int(config.SAMPLE_RATE * seconds / FRAME_SAMPLES)
+        for _ in range(frames_to_drain):
+            stream.read(FRAME_SAMPLES, exception_on_overflow=False)
 
     def close(self):
         self.pa.terminate()

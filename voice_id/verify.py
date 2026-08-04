@@ -1,7 +1,7 @@
 """
 Compares a live audio clip against your enrolled voiceprint. wake_word.py
-calls is_my_voice() after a phrase match — both the words AND the voice
-have to match for the wake to actually trigger.
+calls voice_similarity() after a phrase match to get the actual match
+score — both the words AND the voice have to match for the wake to fire.
 """
 import os
 import numpy as np
@@ -33,13 +33,22 @@ def _load():
         _voiceprint = np.load(PROFILE_PATH)
 
 
-def is_my_voice(pcm_bytes: bytes, sample_rate: int = 16000) -> bool:
+def voice_similarity(pcm_bytes: bytes, sample_rate: int = 16000):
+    """Returns the raw cosine similarity (0-1) against your enrolled
+    voiceprint, or None if the clip was too short to embed reliably.
+    Exposed separately from is_my_voice() so callers can log the actual
+    number — useful for tuning VOICE_MATCH_THRESHOLD against real data
+    instead of guessing."""
     _load()
     audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
     wav = preprocess_wav(audio, source_sr=sample_rate)
     if len(wav) < sample_rate * 0.5:
-        return False  # too short for a reliable embedding
+        return None  # too short for a reliable embedding
     embed = _encoder.embed_utterance(wav)
     embed = embed / np.linalg.norm(embed)
-    similarity = float(np.dot(embed, _voiceprint))
-    return similarity >= config.VOICE_MATCH_THRESHOLD
+    return float(np.dot(embed, _voiceprint))
+
+
+def is_my_voice(pcm_bytes: bytes, sample_rate: int = 16000) -> bool:
+    similarity = voice_similarity(pcm_bytes, sample_rate)
+    return similarity is not None and similarity >= config.VOICE_MATCH_THRESHOLD

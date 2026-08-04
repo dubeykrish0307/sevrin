@@ -32,19 +32,19 @@ WAKE_PHRASES = ["hey jarvis"]
 # --- Audio / VAD timing ---
 SAMPLE_RATE = 16000
 FRAME_DURATION_MS = 30          # webrtcvad requires 10/20/30ms frames
-SILENCE_DURATION_MS = 550       # how long you must pause before we consider you "done"
+SILENCE_DURATION_MS = 900       # how long you must pause before we consider you "done"
 MAX_UTTERANCE_SECONDS = 30      # hard cap so it can't listen forever
 VAD_AGGRESSIVENESS = 2          # 0-3, higher = more aggressive at filtering non-speech
 MIN_SPEECH_FRAMES = 4          # ~300ms of actual detected speech required before an utterance counts as real
 PACKET_SENTENCE_LIMIT = 2       # sentences per "packet" — set high so most replies go out as one packet
-VOICE_MATCH_THRESHOLD = 0.72  # 0-1 cosine similarity — lower = more lenient. Tune after testing.
+VOICE_MATCH_THRESHOLD = 0.5  # 0-1 cosine similarity — lower = more lenient. Tune after testing.
 
 # --- Conversation behavior ---
 FOLLOWUP_WINDOW_SECONDS = 18    # how long after a reply you can keep talking without the wake word
 MAX_HISTORY_TURNS = 20          # rolling conversation memory length (phase-1 scope: in-memory only)
 
 # --- Claude ---
-CLAUDE_MODEL = "claude-sonnet-4-6"
+CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 SYSTEM_PROMPT = """You are a personal voice assistant, speaking out loud in a
 real-time conversation. Keep replies short, natural, and conversational —
 this is speech, not a written document. No markdown, no bullet lists, no
