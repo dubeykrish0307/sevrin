@@ -27,7 +27,8 @@ import numpy as np
 import pyaudio
 
 import config
-from voice_id.verify import voice_similarity, voiceprint_available
+from voice.voice_id.verify import verify as verify_speaker, voiceprint_available, calibration_summary
+from voice import audio_gate
 
 FRAME_SAMPLES = 1280  # 80ms @ 16kHz — openWakeWord's native frame size
 
@@ -37,6 +38,13 @@ class WakeWordListener:
         self.pa = pyaudio.PyAudio()
         self._model = None
         self._voice_id_enabled = True
+        self.noise = audio_gate.NoiseProfile()
+
+    def set_noise_profile(self, profile):
+        """Share the room profile measured elsewhere, rather than calibrating
+        here (see start(): calibrating this early reads silence)."""
+        if profile is not None:
+            self.noise = profile
 
     def start(self):
         import openwakeword
@@ -59,6 +67,20 @@ class WakeWordListener:
                 "  Run: python3 voice_id/record.py   then   python3 voice_id/enroll.py\n"
                 "  Restart main.py afterward to enable voice-only wake.\n"
             )
+
+        if self._voice_id_enabled:
+            cal = calibration_summary() or {}
+            if "genuine_mean" in cal:
+                print(f"[wake_word] voiceprint: {cal.get('n_clips')} clips, "
+                      f"genuine mean {cal['genuine_mean']:.3f}, threshold {cal['threshold']:.3f}")
+            else:
+                print("[wake_word] voiceprint loaded (uncalibrated — re-run enroll.py "
+                      "to calibrate the threshold from your actual voice)")
+
+        # NOTE: no calibration here. Calibrating at this point read pure
+        # silence (mic not warm yet) and produced a nonsense -100 dBFS floor.
+        # The backend calibrates once, after the mic has been opened, and
+        # shares that profile via set_noise_profile().
 
         suffix = " (your voice only)" if self._voice_id_enabled else " (voice check disabled)"
         print(f'[wake_word] listening for "hey jarvis"{suffix}')
@@ -90,17 +112,35 @@ class WakeWordListener:
                 if ww_score < config.WAKE_WORD_THRESHOLD:
                     continue
 
+                clip = b"".join(ring)
+
+                # physical gate first — cheap, and rejects fan/HVAC before we
+                # spend time on speaker verification
+                passed, detail = audio_gate.looks_like_speech(clip, self.noise)
+                if not passed:
+                    # ALWAYS log this. A previous version discarded audio here
+                    # silently, which made a too-strict gate look like the wake
+                    # word simply not working.
+                    print(f'[wake_word] heard "hey jarvis" but audio gate rejected it: '
+                          f'{detail.get("reason")} '
+                          f'({detail.get("db_above_floor")}dB above floor, '
+                          f'band {detail.get("speech_band_ratio")}, '
+                          f'flat {detail.get("spectral_flatness")})')
+                    self._drain(stream, seconds=0.5)
+                    continue
+
                 if self._voice_id_enabled:
-                    clip = b"".join(ring)
-                    voice_score = voice_similarity(clip)
+                    ok, voice_score, thr = verify_speaker(clip)
                     if voice_score is None:
                         print('[wake_word] heard "hey jarvis" but clip was too short to verify — ignoring')
+                        self._drain(stream, seconds=1.0)
                         continue
-                    if voice_score < config.VOICE_MATCH_THRESHOLD:
-                        print(f'[wake_word] heard "hey jarvis" (voice match {voice_score:.2f}, need >= {config.VOICE_MATCH_THRESHOLD}) — ignoring')
-                        self._drain(stream, seconds=1.0)  # skip past the rest of this utterance instead of re-triggering on its tail
+                    if not ok:
+                        print(f'[wake_word] heard "hey jarvis" from someone else '
+                              f'(voice {voice_score:.2f}, need {thr:.2f}) — ignoring')
+                        self._drain(stream, seconds=1.5)
                         continue
-                    print(f"[wake_word] voice match {voice_score:.2f} — confirmed")
+                    print(f"[wake_word] voice confirmed ({voice_score:.2f} >= {thr:.2f})")
 
                 return "hey jarvis"
         finally:

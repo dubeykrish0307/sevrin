@@ -10,11 +10,11 @@ import threading
 import time
 
 import config
-from wake_word import WakeWordListener
-from listener import UtteranceListener
-from stt import transcribe
-from brain import ask_streaming_packets
-from tts import prepare, play
+from voice.wake_word import WakeWordListener
+from voice.listener import UtteranceListener
+from voice.stt import transcribe, get_model
+from brain.llm import ask_streaming_packets
+from voice.tts import prepare, play
 
 
 def _fetch_worker(text_queue, audio_queue, timings):
@@ -62,7 +62,7 @@ def handle_turn(utterance_listener: UtteranceListener, max_seconds: float = None
         return False
 
     print(f"[you] {text}")
-    print("[jarvis] ", end="", flush=True)
+    print("[sevrin] ", end="", flush=True)
 
     text_queue = queue.Queue()
     audio_queue = queue.Queue()
@@ -102,9 +102,16 @@ def handle_turn(utterance_listener: UtteranceListener, max_seconds: float = None
 
 
 def main():
-    wake = WakeWordListener()
-    wake.start()
+    print("[stt] loading whisper model...")
+    get_model()  # eager load — otherwise your first-ever transcription eats the model load time
+
     utterance_listener = UtteranceListener()
+    print("[stt] measuring room noise (stay quiet for a second)...")
+    utterance_listener.calibrate_noise()
+
+    wake = WakeWordListener()
+    wake.set_noise_profile(utterance_listener.noise)
+    wake.start()
 
     try:
         while True:
@@ -124,7 +131,7 @@ def main():
                     break
 
     except KeyboardInterrupt:
-        print("\n[jarvis] shutting down.")
+        print("\n[sevrin] shutting down.")
     finally:
         wake.close()
 

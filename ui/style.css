@@ -1,0 +1,276 @@
+:root {
+  --bg: #000000;
+  --glass-border: rgba(120, 200, 255, 0.14);
+  --text-primary: rgba(230, 246, 255, 0.94);
+  --text-secondary: rgba(150, 195, 225, 0.5);
+  --blue: #2e9eff;
+  --cyan: #6ee7ff;
+  --amber: #ffb84d;
+  --green: #34d399;
+  --hud-line: rgba(110, 231, 255, 0.22);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Inter", sans-serif;
+  overflow: hidden;
+  user-select: none;
+}
+
+.app {
+  position: relative;
+  height: 100vh; width: 100vw;
+  display: grid;
+  grid-template-rows: 54px 1fr 68px;
+  grid-template-columns: 260px 1fr 260px;
+  grid-template-areas:
+    "chrome chrome chrome"
+    "left   stage  right"
+    "left   input  right";
+}
+
+/* faint atmospheric wash + a very subtle grid, like a projected display */
+/* Background stays pure black — the blue wash and grid overlay are gone. */
+
+/* ---------- top chrome ---------- */
+.chrome {
+  grid-area: chrome;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 22px;
+  -webkit-app-region: drag;
+  z-index: 2;
+}
+.wordmark {
+  font-size: 11px; font-weight: 600; letter-spacing: 5px;
+  color: rgba(150, 210, 245, 0.75);
+}
+.chrome-center { flex: 1; text-align: center; }
+.clock {
+  font-size: 11px; letter-spacing: 3px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.status { display: flex; align-items: center; gap: 8px; -webkit-app-region: no-drag; }
+.status-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #444; transition: background .3s, box-shadow .3s;
+}
+.status-dot.connected { background: var(--green); box-shadow: 0 0 9px var(--green); }
+.status-text { font-size: 10px; font-weight: 500; letter-spacing: 2px; color: var(--text-secondary); }
+
+/* ---------- HUD side columns ---------- */
+.hud-col {
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 8px 16px; z-index: 2;
+  overflow: hidden;
+}
+.hud-left { grid-area: left; }
+.hud-right { grid-area: right; align-items: stretch; }
+
+.hud-panel {
+  position: relative;
+  padding: 12px 12px 12px 14px;
+  /* angled corner — the classic HUD bracket shape */
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%);
+  background: linear-gradient(180deg, rgba(20,50,80,0.20), rgba(10,25,45,0.10));
+  border-left: 1px solid rgba(110, 231, 255, 0.45);
+  backdrop-filter: blur(14px) saturate(130%);
+  -webkit-backdrop-filter: blur(14px) saturate(130%);
+}
+.hud-right .hud-panel {
+  border-left: none;
+  border-right: 1px solid rgba(110, 231, 255, 0.45);
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+  padding: 12px 14px 12px 12px;
+  text-align: right;
+}
+
+.hud-panel-title {
+  font-size: 8.5px; font-weight: 700; letter-spacing: 2.4px;
+  color: rgba(110, 231, 255, 0.8);
+  margin-bottom: 9px;
+}
+
+/* task rows */
+.hud-task { margin-bottom: 10px; }
+.hud-task:last-child { margin-bottom: 0; }
+.hud-task-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 10.5px; letter-spacing: 0.4px;
+  color: rgba(205, 235, 255, 0.85);
+  margin-bottom: 4px;
+}
+.hud-task-eta {
+  font-size: 9px; color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.hud-bar {
+  height: 2px; background: rgba(110, 231, 255, 0.14);
+  position: relative; overflow: hidden;
+}
+.hud-bar > i {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  background: linear-gradient(90deg, rgba(46,158,255,0.6), var(--cyan));
+  transition: width .6s ease;
+}
+
+/* meters */
+.hud-meter { margin-bottom: 8px; }
+.hud-meter-label {
+  display: flex; justify-content: space-between;
+  font-size: 9px; letter-spacing: 1px;
+  color: var(--text-secondary); margin-bottom: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.hud-meter-track { height: 2px; background: rgba(110,231,255,0.12); position: relative; }
+.hud-meter-track > i {
+  position: absolute; inset: 0 auto 0 0;
+  background: var(--cyan); transition: width .5s ease;
+}
+
+/* alerts */
+.hud-alert {
+  font-size: 10px; letter-spacing: .3px; line-height: 1.45;
+  padding: 6px 0 6px 0;
+  border-top: 1px solid rgba(110,231,255,0.10);
+  color: rgba(200, 230, 250, 0.8);
+  display: flex; gap: 7px; align-items: flex-start; justify-content: flex-end;
+}
+.hud-alert:first-child { border-top: none; }
+.hud-alert .tag {
+  font-size: 8px; font-weight: 700; letter-spacing: 1.2px;
+  padding: 1px 4px; flex-shrink: 0; margin-top: 1px;
+}
+.tag.info { color: var(--cyan); border: 1px solid rgba(110,231,255,0.4); }
+.tag.warn { color: var(--amber); border: 1px solid rgba(255,184,77,0.45); }
+.tag.ok   { color: var(--green); border: 1px solid rgba(52,211,153,0.4); }
+
+/* telemetry rows */
+.hud-tel-row {
+  display: flex; justify-content: space-between;
+  font-size: 9.5px; letter-spacing: .6px;
+  color: rgba(190, 225, 248, 0.72);
+  padding: 3px 0;
+  font-variant-numeric: tabular-nums;
+}
+.hud-tel-row span:first-child { color: var(--text-secondary); }
+
+/* ---------- center stage ---------- */
+.stage {
+  grid-area: stage;
+  position: relative;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  z-index: 1;
+}
+#orb-container {
+  /* No mask here. The mask that used to fade these edges is what produced
+     the visible dark square around the reactor once the arcs swung wider.
+     The page background is pure black, and the WebGL canvas is transparent,
+     so nothing needs masking — the glow simply falls off into the black. */
+  width: 620px; height: 620px;
+  background: transparent; overflow: visible;
+}
+#orb-container canvas { display: block; background: transparent; }
+
+.state-label {
+  position: absolute; bottom: 6%;
+  font-size: 10px; font-weight: 500; letter-spacing: 5px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+}
+
+/* ---------- floating speech (replaces the chat box) ---------- */
+.speech-layer {
+  position: absolute;
+  bottom: 14%;
+  width: min(680px, 76%);
+  display: flex; flex-direction: column;
+  align-items: center; gap: 8px;
+  pointer-events: none;
+}
+.speech-line {
+  font-size: 12.5px; line-height: 1.55; text-align: center;
+  letter-spacing: .2px;
+  opacity: 0;
+  transform: translateY(6px);
+  animation: speechIn .5s ease forwards;
+  text-shadow: 0 0 18px rgba(46, 158, 255, 0.35);
+}
+.speech-line.user {
+  font-size: 10.5px;
+  color: rgba(150, 200, 235, 0.62);
+  letter-spacing: 1px;
+}
+.speech-line.assistant { color: rgba(226, 245, 255, 0.95); }
+.speech-line.fading { animation: speechOut .8s ease forwards; }
+
+@keyframes speechIn {
+  from { opacity: 0; transform: translateY(6px); filter: blur(3px); }
+  to   { opacity: 1; transform: translateY(0);   filter: blur(0); }
+}
+@keyframes speechOut {
+  from { opacity: 1; transform: translateY(0); filter: blur(0); }
+  to   { opacity: 0; transform: translateY(-6px); filter: blur(3px); }
+}
+
+/* ---------- input ---------- */
+.input-bar {
+  grid-area: input;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 20px 18px; z-index: 2;
+}
+.input-bar input {
+  width: 100%; max-width: 460px;
+  padding: 10px 16px;
+  background: rgba(20, 45, 70, 0.22);
+  border: 1px solid var(--glass-border);
+  border-radius: 2px;
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%);
+  color: var(--text-primary);
+  font-size: 12.5px; letter-spacing: .5px;
+  outline: none;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  text-align: center;
+}
+.input-bar input::placeholder { color: rgba(140,185,215,0.4); letter-spacing: 2px; font-size: 11px; }
+.input-bar input:focus { border-color: rgba(110, 231, 255, 0.5); background: rgba(25, 55, 85, 0.3); }
+
+/* ---------- memory panel ---------- */
+.hud-count {
+  float: right;
+  color: rgba(110, 231, 255, 0.55);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.hud-memory { display: flex; flex-direction: column; gap: 6px; }
+.mem-event {
+  font-size: 9.5px; line-height: 1.4; letter-spacing: .2px;
+  display: flex; gap: 6px; align-items: flex-start;
+  color: rgba(200, 230, 250, 0.78);
+  animation: memIn .45s ease;
+}
+.mem-event .dot {
+  width: 4px; height: 4px; border-radius: 50%;
+  margin-top: 5px; flex-shrink: 0;
+}
+.mem-event.stored  .dot { background: var(--green);  box-shadow: 0 0 6px var(--green); }
+.mem-event.updated .dot { background: var(--cyan);   box-shadow: 0 0 6px var(--cyan); }
+.mem-event.rejected .dot { background: rgba(255,120,120,.8); }
+.mem-event.duplicate .dot { background: rgba(150,180,200,.5); }
+.mem-event .txt { flex: 1; }
+.mem-event .stage {
+  display: block;
+  font-size: 8px; letter-spacing: 1.2px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+@keyframes memIn {
+  from { opacity: 0; transform: translateX(-4px); }
+  to   { opacity: 1; transform: translateX(0); }
+}

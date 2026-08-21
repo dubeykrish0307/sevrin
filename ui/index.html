@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SEVRIN</title>
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "./node_modules/three/build/three.module.js",
+    "three/addons/": "./node_modules/three/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+  <div class="app">
+    <header class="chrome">
+      <div class="wordmark">S E V R I N</div>
+      <div class="chrome-center" id="chromeCenter">
+        <span class="clock" id="clock">--:--:--</span>
+      </div>
+      <div class="status">
+        <span class="status-dot" id="statusDot"></span>
+        <span class="status-text" id="statusText">OFFLINE</span>
+      </div>
+    </header>
+
+    <!-- LEFT HUD COLUMN: active tasks / operations -->
+    <aside class="hud-col hud-left">
+      <div class="hud-panel">
+        <div class="hud-panel-title">ACTIVE OPERATIONS</div>
+        <div class="hud-tasks" id="hudTasks"></div>
+      </div>
+      <div class="hud-panel">
+        <div class="hud-panel-title">MEMORY <span class="hud-count" id="memCount">0</span></div>
+        <div class="hud-memory" id="hudMemory"></div>
+      </div>
+      <div class="hud-panel">
+        <div class="hud-panel-title">SYSTEM</div>
+        <div class="hud-meters" id="hudMeters"></div>
+      </div>
+    </aside>
+
+    <!-- CENTER STAGE -->
+    <main class="stage">
+      <div id="orb-container"></div>
+      <div class="speech-layer" id="speechLayer"></div>
+      <div class="state-label" id="stateLabel">IDLE</div>
+    </main>
+
+    <!-- RIGHT HUD COLUMN: alerts / telemetry -->
+    <aside class="hud-col hud-right">
+      <div class="hud-panel">
+        <div class="hud-panel-title">ALERTS</div>
+        <div class="hud-alerts" id="hudAlerts"></div>
+      </div>
+      <div class="hud-panel">
+        <div class="hud-panel-title">TELEMETRY</div>
+        <div class="hud-telemetry" id="hudTelemetry"></div>
+      </div>
+    </aside>
+
+    <div class="input-bar">
+      <input id="textInput" type="text" placeholder="Type to SEVRIN…" autocomplete="off">
+    </div>
+  </div>
+
+  <script type="module" src="renderer.js"></script>
+</body>
+</html>

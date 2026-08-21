@@ -1,6 +1,13 @@
-./venv
 venv/
-/.env 
 .env
-.env/ 
-.env   
+__pycache__/
+*.pyc
+.DS_Store
+
+# real biometric/voice data — stays local only
+voice/voice_id/recordings/
+voice/voice_id/profile/
+
+# runtime state
+data/*
+!data/.gitkeep
