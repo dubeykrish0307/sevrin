@@ -47,6 +47,7 @@ from voice.wake_word import WakeWordListener
 from voice.listener import UtteranceListener
 from voice.stt import transcribe, get_model
 from voice.barge_in import BargeInListener
+from voice import audio_device
 from brain.llm import ask_streaming_packets
 from brain import llm as brain_llm
 from brain import store as memory_store
@@ -59,7 +60,11 @@ _clients = set()
 _loop = None
 # shared mic listener, set up in _voice_loop; _run_turn needs it to capture
 # the rest of an interruption after the short barge-in clip
-utterance_listener_ref = [None]  # the asyncio event loop, captured at startup so the voice
+utterance_listener_ref = [None]
+# ONE barge-in listener reused across turns. Constructing a new one per turn
+# (each with its own PyAudio instance, terminated on close) is what wedged
+# CoreAudio into returning permanent silence.
+barge_listener_ref = [None]  # the asyncio event loop, captured at startup so the voice
               # thread (which is plain blocking code) can hand events
               # across to it safely
 
@@ -178,7 +183,9 @@ def _run_turn(user_text: str, interruption: dict = None):
     spoken_lock = threading.Lock()
 
     interrupted = threading.Event()
-    barge = BargeInListener()
+    if barge_listener_ref[0] is None:
+        barge_listener_ref[0] = BargeInListener()
+    barge = barge_listener_ref[0]
     # reuse the room profile the main listener already measured — barge-in
     # can't calibrate itself while audio is playing
     _ul = utterance_listener_ref[0]
@@ -248,7 +255,7 @@ def _run_turn(user_text: str, interruption: dict = None):
     barge.stop()
 
     if not interrupted.is_set():
-        barge.close()
+        barge.stop()   # stop listening, but keep the object (see barge_listener_ref)
         emit({"type": "state", "value": "idle"})
         return None
 
@@ -261,7 +268,7 @@ def _run_turn(user_text: str, interruption: dict = None):
 
     # transcribe what Krish said over him
     clip = barge.captured_audio
-    barge.close()
+    barge.stop()
     heard = ""
     try:
         if clip:
@@ -348,6 +355,9 @@ def _voice_loop():
         raise
     finally:
         wake.close()
+        if barge_listener_ref[0] is not None:
+            barge_listener_ref[0].stop()
+        audio_device.shutdown()
 
 
 async def _main():
@@ -361,10 +371,27 @@ async def _main():
         emit({"type": "memory_stats", "data": memory_store.stats()})
     brain_llm.on_memory_event = _memory_event
 
-    threading.Thread(target=_voice_loop, daemon=True).start()
+    # Bind the port BEFORE starting the voice loop. The old order started the
+    # voice loop first, so on a port conflict the process would claim the
+    # microphone and then immediately exit — briefly holding the audio device
+    # for no reason and making the next start flakier.
+    try:
+        server = await websockets.serve(_handler, HOST, PORT)
+    except OSError as e:
+        if getattr(e, "errno", None) == 48:
+            print(f"\n[backend] PORT {PORT} IS ALREADY IN USE.")
+            print("[backend] Another SEVRIN backend is still running — probably")
+            print("[backend] one started from a terminal earlier. Kill it with:")
+            print(f"[backend]     lsof -ti:{PORT} | xargs kill -9")
+            print("[backend] (the desktop app now does this automatically on start)\n")
+            return
+        raise
 
     print(f"[backend] websocket server on ws://{HOST}:{PORT}")
-    async with websockets.serve(_handler, HOST, PORT):
+
+    threading.Thread(target=_voice_loop, daemon=True).start()
+
+    async with server:
         await asyncio.Future()  # run forever
 
 

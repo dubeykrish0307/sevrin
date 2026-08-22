@@ -11,3 +11,5 @@ voice/voice_id/profile/
 # runtime state
 data/*
 !data/.gitkeep
+node_modules/
+**/node_modules/

@@ -26,12 +26,12 @@ import collections
 import threading
 
 import numpy as np
-import pyaudio
 import webrtcvad
 
 import config
 from voice.voice_id.verify import verify as verify_speaker, voiceprint_available
 from voice import audio_gate
+from voice import audio_device
 
 FRAME_MS = 30
 FRAME_SAMPLES = int(config.SAMPLE_RATE * FRAME_MS / 1000)
@@ -52,7 +52,9 @@ class BargeInListener:
     once, the moment a verified interruption from Krish is detected."""
 
     def __init__(self):
-        self.pa = pyaudio.PyAudio()
+        # NOTE: no PyAudio instance of its own. This class used to build one
+        # per turn and terminate it on close, which wedged CoreAudio into
+        # returning permanent silence. See voice/audio_device.py.
         self.vad = webrtcvad.Vad(BARGE_VAD_AGGRESSIVENESS)
         self.noise = audio_gate.NoiseProfile()
         self._thread = None
@@ -80,10 +82,7 @@ class BargeInListener:
 
     def _run(self, on_interrupt):
         try:
-            stream = self.pa.open(
-                rate=config.SAMPLE_RATE, channels=1, format=pyaudio.paInt16,
-                input=True, frames_per_buffer=FRAME_SAMPLES,
-            )
+            stream = audio_device.open_input_stream(config.SAMPLE_RATE, FRAME_SAMPLES)
         except Exception as e:
             print(f"[barge_in] couldn't open mic: {e}")
             return
@@ -152,7 +151,5 @@ class BargeInListener:
                 pass
 
     def close(self):
-        try:
-            self.pa.terminate()
-        except Exception:
-            pass
+        # Deliberately does NOT terminate the shared audio device.
+        self.stop()

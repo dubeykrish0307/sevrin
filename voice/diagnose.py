@@ -27,7 +27,11 @@ from voice import audio_gate
 from voice.voice_id import verify as speaker
 
 SAMPLES = 5
-CLIP_SECONDS = 2.0
+# Match the LIVE wake path's buffer length exactly. An earlier version used a
+# different duration, and the resulting numbers didn't match what the wake
+# word actually measured — which sent tuning in the wrong direction. If you
+# change VOICE_ID_CLIP_SECONDS, this follows it automatically.
+CLIP_SECONDS = float(getattr(config, "VOICE_ID_CLIP_SECONDS", 2.5))
 
 
 def record(pa, seconds):
@@ -50,6 +54,13 @@ def main():
     profile.calibrate(pa, seconds=2.0)
     print(f"  floor_rms = {profile.floor_rms:.6f}\n")
 
+    from voice.voice_id import encoder as enc
+    print(f"Speaker model: {enc.backend_name()}")
+    if enc.backend_name() != "ecapa":
+        print("  WARNING: running the weak fallback. `pip install speechbrain`")
+        print("  then re-run enroll.py for far better accuracy.")
+    print()
+
     has_print = speaker.voiceprint_available()
     if has_print:
         cal = speaker.calibration_summary() or {}
@@ -67,7 +78,10 @@ def main():
         print("!" * 60 + "\n")
 
     print(f"Step 2: say \"hey jarvis\" {SAMPLES} times when prompted.")
-    print("Vary it like real use: normal, quieter, further from the mic.\n")
+    print(f"Each clip is {CLIP_SECONDS}s — the same length the live wake path uses,")
+    print("so these numbers are directly comparable to what it measures.")
+    print("Vary it like real use: normal, quieter, closer and further from the mic.")
+    print("Mic distance matters a lot — include at least one very close.\n")
 
     gate_results = []
     voice_scores = []

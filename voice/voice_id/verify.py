@@ -23,16 +23,15 @@ import json
 import os
 
 import numpy as np
-from resemblyzer import VoiceEncoder, preprocess_wav
 
 import config
+from voice.voice_id import encoder as enc
 
 PROFILE_DIR = os.path.join(os.path.dirname(__file__), "profile")
 PROFILE_PATH = os.path.join(PROFILE_DIR, "voiceprint.npy")
 EMBEDDINGS_PATH = os.path.join(PROFILE_DIR, "embeddings.npy")
 CALIBRATION_PATH = os.path.join(PROFILE_DIR, "calibration.json")
 
-_encoder = None
 _centroid = None
 _embeddings = None
 _calibration = None
@@ -52,9 +51,7 @@ def voiceprint_available() -> bool:
 
 
 def _load():
-    global _encoder, _centroid, _embeddings, _calibration
-    if _encoder is None:
-        _encoder = VoiceEncoder()
+    global _centroid, _embeddings, _calibration
     if _centroid is None:
         if not os.path.exists(PROFILE_PATH):
             raise FileNotFoundError(
@@ -71,6 +68,21 @@ def _load():
         if os.path.exists(CALIBRATION_PATH):
             with open(CALIBRATION_PATH) as f:
                 _calibration = json.load(f)
+            if _calibration.get("pipeline_version", 1) < 4:
+                raise RuntimeError(
+                    "Voiceprint was built with an older embedding pipeline and its "
+                    "scores are not comparable. "
+                    "Re-run: python3 voice/voice_id/enroll.py"
+                )
+            saved = _calibration.get("backend")
+            current = enc.backend_name()
+            if saved and saved != current:
+                # Embeddings from different models are not comparable at all —
+                # scores would be meaningless rather than merely inaccurate.
+                raise RuntimeError(
+                    f"Voiceprint was enrolled with '{saved}' but the running "
+                    f"encoder is '{current}'. Re-run: python3 voice/voice_id/enroll.py"
+                )
         else:
             _calibration = {"threshold": config.VOICE_MATCH_THRESHOLD}
 
@@ -85,10 +97,32 @@ LIVE_DOMAIN_ALLOWANCE = float(getattr(config, "VOICE_LIVE_ALLOWANCE", 0.08))
 def threshold_for(duration_seconds: float) -> float:
     _load()
     base = float(_calibration.get("threshold", config.VOICE_MATCH_THRESHOLD))
-    base = max(0.45, base - LIVE_DOMAIN_ALLOWANCE)
+    base = max(0.35, base - LIVE_DOMAIN_ALLOWANCE)   # 0.35 floor suits ECAPA's scale
     if duration_seconds < SHORT_CLIP_SECONDS:
         return base + SHORT_CLIP_PENALTY
     return base
+
+
+def _canonical_window(audio: np.ndarray, sample_rate: int):
+    """Return a fixed-length CONTIGUOUS slice, so every verification sees the
+    same duration the voiceprint was built from.
+
+    Enrollment embeds 2.5s windows. Wake clips are exactly 2.5s and score
+    well (0.43-0.59), but COMMANDS are whatever length the sentence happened
+    to be — and a ~1s command scored 0.13 against the same voiceprint, purely
+    from the duration mismatch. Speaker embeddings are sensitive to utterance
+    length, so the fix is to always score the same amount of audio.
+
+    Longer input: take a window from the middle, where the speech actually is
+    (the start often contains the leading pre-roll and the end trails off).
+    Shorter input: use it whole — audio can't be invented, and the caller is
+    warned via the returned flag.
+    """
+    win = int(sample_rate * float(getattr(config, "VOICE_ID_CLIP_SECONDS", 2.5)))
+    if audio.size <= win:
+        return audio, False           # shorter than ideal
+    start = (audio.size - win) // 2   # centre slice, contiguous
+    return audio[start:start + win], True
 
 
 def voice_similarity(pcm_bytes: bytes, sample_rate: int = 16000):
@@ -100,15 +134,13 @@ def voice_similarity(pcm_bytes: bytes, sample_rate: int = 16000):
         return None
     if audio.size < sample_rate * MIN_CLIP_SECONDS:
         return None
-    try:
-        wav = preprocess_wav(audio, source_sr=sample_rate)
-    except Exception:
-        return None
-    if len(wav) < sample_rate * 0.4:
-        return None
 
-    emb = _encoder.embed_utterance(wav)
-    emb = emb / np.linalg.norm(emb)
+    # Match the enrollment domain: always embed a fixed-length window.
+    audio, _full = _canonical_window(audio, sample_rate)
+
+    emb = enc.embed(audio, sample_rate)
+    if emb is None:
+        return None
 
     # centroid scoring — see the module docstring for why this beats top-K
     return float(np.dot(_centroid, emb))

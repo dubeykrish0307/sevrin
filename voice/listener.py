@@ -15,9 +15,9 @@ Three layers of filtering before audio is accepted as a real command:
 """
 import collections
 import webrtcvad
-import pyaudio
 
 import config
+from voice import audio_device
 from voice import audio_gate
 from voice.voice_id import verify as speaker
 
@@ -25,7 +25,7 @@ from voice.voice_id import verify as speaker
 class UtteranceListener:
     def __init__(self):
         self.vad = webrtcvad.Vad(config.VAD_AGGRESSIVENESS)
-        self.pa = pyaudio.PyAudio()
+        self.pa = audio_device.get_pa()
         self.noise = audio_gate.NoiseProfile()
         self._verify_enabled = speaker.voiceprint_available()
 
@@ -44,12 +44,9 @@ class UtteranceListener:
         value for follow-up turns so silence times out on the window you
         actually configured instead of the (longer) default cap.
         """
-        stream = self.pa.open(
-            rate=config.SAMPLE_RATE,
-            channels=1,
-            format=pyaudio.paInt16,
-            input=True,
-            frames_per_buffer=int(config.SAMPLE_RATE * config.FRAME_DURATION_MS / 1000),
+        stream = audio_device.open_input_stream(
+            config.SAMPLE_RATE,
+            int(config.SAMPLE_RATE * config.FRAME_DURATION_MS / 1000),
         )
 
         silence_frames_needed = config.SILENCE_DURATION_MS // config.FRAME_DURATION_MS
@@ -90,6 +87,26 @@ class UtteranceListener:
                     audio_frames.append(frame)
 
                 if heard_speech and len(ring) == ring.maxlen and not any(ring):
+                    # Speaker verification embeds a fixed-length window, and a
+                    # very short command ("stop", "yes") doesn't contain enough
+                    # audio for that — which showed up as genuine commands
+                    # scoring 0.13. Keep capturing a little longer so there's
+                    # enough to verify, while still ending promptly.
+                    needed = int(config.SAMPLE_RATE * config.VOICE_ID_CLIP_SECONDS)
+                    have = len(audio_frames) * int(config.SAMPLE_RATE * config.FRAME_DURATION_MS / 1000)
+                    if have >= needed or frame_count >= max_frames:
+                        break
+                    extra = int((needed - have) / (config.SAMPLE_RATE * config.FRAME_DURATION_MS / 1000))
+                    extra = min(extra, int(1.5 * 1000 / config.FRAME_DURATION_MS))
+                    for _ in range(extra):
+                        try:
+                            f = stream.read(
+                                int(config.SAMPLE_RATE * config.FRAME_DURATION_MS / 1000),
+                                exception_on_overflow=False,
+                            )
+                        except Exception:
+                            break
+                        audio_frames.append(f)   # contiguous continuation
                     break
         finally:
             stream.close()

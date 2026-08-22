@@ -9,4 +9,7 @@ anthropic>=0.40.0
 python-dotenv==1.0.1
 requests==2.32.3
 numpy==1.26.4
+# ECAPA-TDNN speaker verification (~0.8% EER) — far stronger than
+# resemblyzer, which is kept only as an automatic fallback.
+speechbrain>=1.0.0
 resemblyzer==0.1.4

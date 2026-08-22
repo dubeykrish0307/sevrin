@@ -21,6 +21,8 @@
         <span class="clock" id="clock">--:--:--</span>
       </div>
       <div class="status">
+        <button class="ctl-btn" id="backendBtn">START BACKEND</button>
+        <span class="ctl-state" id="backendState">stopped</span>
         <span class="status-dot" id="statusDot"></span>
         <span class="status-text" id="statusText">OFFLINE</span>
       </div>
@@ -58,6 +60,13 @@
       <div class="hud-panel">
         <div class="hud-panel-title">TELEMETRY</div>
         <div class="hud-telemetry" id="hudTelemetry"></div>
+      </div>
+      <div class="hud-panel hud-panel-log">
+        <div class="hud-panel-title">BACKEND LOG
+          <span class="log-file" id="logFile"></span>
+          <button class="log-open" id="openLogs" title="Open logs folder">⤢</button>
+        </div>
+        <div class="hud-log" id="hudLog"></div>
       </div>
     </aside>
 

@@ -27,7 +27,32 @@ ASSISTANT_NAME = "SEVRIN"   # Self-Evolving Verified Reasoning Intelligence Nexu
 # How much lower live samples are allowed to score than enrollment clips.
 # Enrollment uses longer, cleaner recordings; live wake clips are short and
 # captured mid-movement, so they score lower against the same voiceprint.
-VOICE_LIVE_ALLOWANCE = 0.08
+# MEASURED on the real wake path: live clips scored 0.62-0.66 against an
+# enrollment-calibrated threshold of 0.776 — a gap of ~0.13-0.16, not the
+# 0.08 originally assumed. Enrollment clips are longer and cleaner than a
+# live 2.5s ring buffer captured mid-motion, so they score systematically
+# higher against the same centroid. 0.18 accepts his real voice with margin
+# while still sitting well above where a different speaker typically lands.
+# With ECAPA-TDNN the enrollment/live gap is much smaller than it was with
+# Resemblyzer, because the embedding space is far more robust to recording
+# conditions. Start modest; enroll.py prints the real calibration numbers.
+# MEASURED, not guessed. With the (known-good) untrimmed pipeline:
+#     enrollment leave-one-out mean : 0.786
+#     live wake clips               : 0.55 - 0.57
+# so the real enrollment->live gap is ~0.22-0.24. Enrollment clips are longer
+# and denser in speech than a 2.5s wake buffer that's mostly room tone, and
+# that difference is inherent to the two situations.
+#
+# 0.24 gives an effective threshold around 0.46 against live scores of
+# 0.55-0.57 — accepted with margin — while ECAPA puts different speakers
+# near 0.2-0.3, so impostors stay rejected. (Confirmed by this very log:
+# with the broken pipeline his own voice hit 0.17-0.22, which is exactly
+# the range a stranger lands in.)
+# Enrollment is now embedded in windows the same length as a live clip
+# (see voice/voice_id/encoder.embed_file_windows), so the two are in the same
+# domain and the gap should be much smaller than the 0.24 that the old
+# whole-file enrollment needed. Keep some headroom for mic distance.
+VOICE_LIVE_ALLOWANCE = 0.10
 
 # --- Acoustic gating (rejects fans/HVAC before speaker verification) ---
 # Measure your own values with: python3 voice/diagnose.py
@@ -46,10 +71,17 @@ VOICE_LIVE_ALLOWANCE = 0.08
 #
 # NOTE: the original GATE_MIN_BAND_RATIO of 0.45 is exactly why "hey jarvis"
 # was being silently discarded — three of five genuine samples fell below it.
-GATE_NOISE_MARGIN_DB = 8.0      # his worst was 13.8, fan was 12.6
-GATE_MIN_BAND_RATIO = 0.32      # between fan (0.258) and his worst (0.422)
+# NOTE: band ratio is now computed bass-robustly (denominator excludes
+# sub-150Hz), so these numbers are on a different scale than the earlier
+# measurements. Synthetic check with the new measure:
+#   speech at any mic distance 0.66-0.90 | fan rumble 0.41
+GATE_NOISE_MARGIN_DB = 8.0      # his quietest was 13.8dB
+GATE_MIN_BAND_RATIO = 0.30      # MEASURED: his real speech runs 0.439-0.662, so
+                                # 0.45 was clipping the bottom of his own range.
+                                # Fan rumble measured ~0.24-0.29, so 0.30 still
+                                # separates them.
 GATE_MAX_FLATNESS = 0.70        # loose sanity check only, not the discriminator
-GATE_ABSOLUTE_FLOOR_RMS = 0.003 # hard silence floor
+GATE_ABSOLUTE_FLOOR_RMS = 0.0004 # true-silence guard only
 
 # --- Memory ---
 MEMORY_ENABLED = True
@@ -72,7 +104,12 @@ MEMORY_MIN_CONFIDENCE = 0.7   # facts below this are never stored (see brain/ext
 # without "hey".
 WAKE_WORD_MODEL = "hey_jarvis"
 WAKE_WORD_THRESHOLD = 0.5   # 0-1, higher = fewer false wakes but more missed ones
-VOICE_ID_CLIP_SECONDS = 1.5  # rolling audio buffer used for voice verification after a wake fires
+# Rolling audio buffer used for speaker verification after a wake fires.
+# Raised from 1.5s: resemblyzer embeddings get markedly more reliable with
+# more audio, and short clips were scoring ~0.15 below the enrollment
+# threshold purely from embedding noise. More audio closes that gap at the
+# source rather than papering over it by lowering the threshold.
+VOICE_ID_CLIP_SECONDS = 2.5
 # Used by voice_id/record.py to prompt you for enrollment clips — not used
 # for wake matching anymore (openWakeWord handles that).
 WAKE_PHRASES = ["hey jarvis"]
@@ -95,7 +132,7 @@ PACKET_SENTENCE_LIMIT = 1       # sentences per "packet" — TTS starts on sente
                                  # Was 2, which (combined with the system prompt asking for 1-2 sentence
                                  # replies) meant most replies waited for the ENTIRE response before any
                                  # audio was requested at all — you got none of the streaming benefit.
-VOICE_MATCH_THRESHOLD = 0.5  # 0-1 cosine similarity. Tuned from real data: your genuine
+VOICE_MATCH_THRESHOLD = 0.40   # fallback only; calibration.json wins  # 0-1 cosine similarity. Tuned from real data: your genuine
                               # "hey jarvis" attempts scored 0.57-0.61 (short live clips score
                               # lower than clean enrollment clips — that's normal). Set below
                               # that range with margin. If a stranger's voice starts triggering

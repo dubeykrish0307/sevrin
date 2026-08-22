@@ -17,6 +17,72 @@ const stateLabel = document.getElementById('stateLabel');
 const textInput = document.getElementById('textInput');
 const speechLayer = document.getElementById('speechLayer');
 const clockEl = document.getElementById('clock');
+const backendBtn = document.getElementById('backendBtn');
+const backendState = document.getElementById('backendState');
+const hudLog = document.getElementById('hudLog');
+const logFileEl = document.getElementById('logFile');
+const openLogsBtn = document.getElementById('openLogs');
+
+// ==================================================================
+// BACKEND CONTROL — start/stop the python service from here instead of
+// a separate terminal. window.sevrin is exposed by preload.js; it's absent
+// if the page is opened outside Electron, so every use is guarded.
+// ==================================================================
+
+let backendRunning = false;
+
+function appendLog(line) {
+  if (!hudLog) return;
+  const div = document.createElement('div');
+  if (/error|Traceback|failed/i.test(line)) div.className = 'err';
+  else if (/confirmed|websocket server|using ECAPA/i.test(line)) div.className = 'ok';
+  div.textContent = line;
+  hudLog.appendChild(div);
+  while (hudLog.children.length > 200) hudLog.removeChild(hudLog.firstChild);
+  hudLog.scrollTop = hudLog.scrollHeight;
+}
+
+function setBackendUi(status) {
+  backendRunning = (status === 'running' || status === 'starting');
+  if (backendState) backendState.textContent = status;
+  if (!backendBtn) return;
+  backendBtn.classList.toggle('running', status === 'running');
+  backendBtn.classList.toggle('starting', status === 'starting');
+  backendBtn.textContent =
+    status === 'running' ? 'STOP BACKEND'
+    : status === 'starting' ? 'STARTING…'
+    : 'START BACKEND';
+}
+
+if (window.sevrin) {
+  window.sevrin.onBackendLog(appendLog);
+  window.sevrin.onBackendStatus(setBackendUi);
+  window.sevrin.getBackendStatus().then(setBackendUi);
+
+  backendBtn.addEventListener('click', () => {
+    if (backendRunning) window.sevrin.stopBackend();
+    else window.sevrin.startBackend();
+  });
+
+  if (openLogsBtn) {
+    openLogsBtn.addEventListener('click', () => window.sevrin.revealLogs());
+  }
+
+  // show which file the current session is writing to
+  const refreshLogName = () => {
+    window.sevrin.currentLog().then((name) => {
+      if (logFileEl) logFileEl.textContent = name || '';
+    });
+  };
+  refreshLogName();
+  window.sevrin.onBackendStatus(() => setTimeout(refreshLogName, 200));
+} else {
+  if (backendBtn) {
+    backendBtn.textContent = 'N/A';
+    backendBtn.disabled = true;
+  }
+  if (backendState) backendState.textContent = 'no electron';
+}
 
 // ==================================================================
 // HUD PANELS

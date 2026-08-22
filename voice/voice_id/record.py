@@ -19,8 +19,8 @@ import config
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "recordings")
 SAMPLE_RATE = 16000
-REPS_PER_PHRASE = 10
-FREE_SPEECH_SECONDS = 45
+REPS_PER_PHRASE = 6
+FREE_SPEECH_SECONDS = 60
 
 
 def record_clip(pa, seconds, path):
@@ -54,6 +54,10 @@ def main():
     print("=== Voice enrollment ===")
     print("Recording you saying each wake phrase, then some free speech.")
     print("Everything stays on this machine.\n")
+    print("Each wake-phrase capture is 3.5s and the free-speech one is 60s.")
+    print("Longer recordings matter: the voiceprint is built from 2.5s windows")
+    print("sliced out of them, matching the length of a live wake clip, and a")
+    print("2s capture is too short to window.\n")
     print("HOW TO GET A STRONG VOICEPRINT — this decides how well SEVRIN can")
     print("tell you apart from other people, so it's worth doing properly:")
     print("  * quiet room, no fan or music running")
@@ -66,10 +70,11 @@ def main():
     for phrase in config.WAKE_PHRASES:
         print(f'\nPhrase: "{phrase}" — say it {REPS_PER_PHRASE} times, one at a time.')
         for rep in range(REPS_PER_PHRASE):
-            input(f'  [{rep + 1}/{REPS_PER_PHRASE}] Press Enter, then say "{phrase}"...')
+            input(f'  [{rep + 1}/{REPS_PER_PHRASE}] Press Enter, then say "{phrase}" '
+                  f'(keep talking briefly after — say it, pause, say it again)...')
             countdown()
             path = os.path.join(OUTPUT_DIR, f"clip_{clip_index:03d}.wav")
-            record_clip(pa, 2.0, path)
+            record_clip(pa, 3.5, path)
             clip_index += 1
 
     print(f"\nLast step: talk normally for {FREE_SPEECH_SECONDS} seconds — describe")
