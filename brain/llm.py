@@ -144,3 +144,93 @@ def _extract_in_background(user_text: str, turn_id: int):
                 print(f"[memory] rejected at {ev.get('stage')}: {ev.get('fact')} — {ev.get('detail')}")
     except Exception as e:
         print(f"[memory] extraction failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Proactive speech
+# ---------------------------------------------------------------------------
+
+_JUDGE_SYSTEM = """You decide whether an assistant should speak up right now,
+unprompted, or keep waiting.
+
+The assistant only reaches you for genuinely ambiguous cases — obvious ones
+(he's mid-sentence, the item is urgent and the user is free) are already
+handled mechanically before you see them. So assume the situation is a real
+judgement call.
+
+Weigh:
+- How much the user would want this NOW versus in a few minutes.
+- Whether the moment looks like a natural pause or a brief gap in something
+  ongoing. A few seconds of silence usually means someone is still thinking,
+  not that they've finished.
+- How long the item has waited. Something repeatedly deferred should
+  eventually be said or it's useless.
+- Whether it's still actionable. Information the user can't act on is noise.
+
+Default to waiting. Silence costs a short delay; a badly timed interruption
+costs trust. But do not defer indefinitely — if an item has been considered
+several times and still matters, say it.
+
+Answer ONLY with JSON: {"speak": true|false, "reason": "<one short sentence>"}"""
+
+
+def judge_proactive(item, situation: dict) -> bool:
+    """Layer 3 of the proactive decision — see backend/proactive.py."""
+    prompt = (
+        f"ITEM\n"
+        f"  kind    : {item.kind}\n"
+        f"  urgency : {item.urgency}\n"
+        f"  content : {item.summary}\n\n"
+        f"SITUATION\n"
+        + "\n".join(f"  {k}: {v}" for k, v in situation.items())
+    )
+    resp = _client.messages.create(
+        model=extractor.VERIFY_MODEL,   # fast model; this is a narrow decision
+        max_tokens=150,
+        system=_JUDGE_SYSTEM,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = "".join(b.text for b in resp.content if hasattr(b, "text"))
+    data = extractor._json_from(text)
+    if not isinstance(data, dict):
+        return False        # unparseable -> stay quiet
+    decision = bool(data.get("speak"))
+    print(f"[proactive] judge: {'SPEAK' if decision else 'wait'} — {data.get('reason','')}")
+    return decision
+
+
+_PHRASE_SYSTEM = """You are SEVRIN, speaking to Krish unprompted — he did not
+ask you anything; you are the one starting this.
+
+Turn the facts you're given into ONE short spoken line, in character:
+understated, precise, no preamble. Lead with the thing that matters.
+
+Because you're interrupting his attention unasked, be briefer than usual.
+No "just letting you know", no "I wanted to mention", no apologising for
+speaking. State it and stop.
+
+Output only the line itself."""
+
+
+def phrase_proactive(item) -> str:
+    """SEVRIN phrases the item himself rather than reading a canned string,
+    so unprompted remarks sound like him and not like a notification."""
+    try:
+        resp = _client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=120,
+            system=_PHRASE_SYSTEM + _memory_context(),
+            messages=[{"role": "user", "content":
+                       f"Facts to convey ({item.kind}): {item.summary}"}],
+        )
+        line = "".join(b.text for b in resp.content if hasattr(b, "text")).strip()
+        return line or item.summary
+    except Exception as e:
+        print(f"[proactive] phrasing failed ({e}); using raw summary")
+        return item.summary
+
+
+def record_proactive(line: str):
+    """Log what SEVRIN said unprompted, so it's part of conversation history
+    and he doesn't repeat himself or lose the thread."""
+    store.add_turn("assistant", line)

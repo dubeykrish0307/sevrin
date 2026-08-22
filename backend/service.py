@@ -51,6 +51,8 @@ from voice import audio_device
 from brain.llm import ask_streaming_packets
 from brain import llm as brain_llm
 from brain import store as memory_store
+from backend import proactive as proactive_mod
+from backend import reminders as reminders_mod
 from voice import tts
 
 HOST = "localhost"
@@ -69,9 +71,21 @@ barge_listener_ref = [None]  # the asyncio event loop, captured at startup so th
               # across to it safely
 
 
+_current_state = "idle"
+
+
+def current_state():
+    return _current_state
+
+
 def emit(event: dict):
     """Thread-safe: call from any thread, including the blocking voice
     loop thread, to broadcast an event to all connected UI clients."""
+    # Keep a local copy of state — the proactive queue's structural rules
+    # depend on knowing exactly what's happening right now.
+    global _current_state
+    if event.get("type") == "state":
+        _current_state = event.get("value", _current_state)
     if _loop is None:
         return
     asyncio.run_coroutine_threadsafe(_broadcast(event), _loop)
@@ -147,6 +161,67 @@ def _speak_with_animation(text: str):
         emit({"type": "amplitude", "value": 0.0})
 
 
+# ---------------------------------------------------------------------------
+# Proactive speech — SEVRIN talking without being asked.
+# ---------------------------------------------------------------------------
+
+proactive_queue = None
+reminder_timers = None
+
+
+def _speak_proactively(item):
+    """Deliver one proactive item: SEVRIN phrases it himself, says it, and
+    it's recorded in conversation history so he doesn't repeat it or lose
+    the thread if Krish replies."""
+    line = brain_llm.phrase_proactive(item)
+
+    emit({"type": "state", "value": "speaking"})
+    emit({"type": "proactive", "text": line, "kind": item.kind})
+    emit({"type": "transcript_start", "role": "assistant"})
+    emit({"type": "transcript_delta", "text": line})
+    emit({"type": "transcript_end"})
+    print(f"[sevrin, unprompted] {line}")
+
+    try:
+        _speak_with_animation(line)
+    finally:
+        brain_llm.record_proactive(line)
+        emit({"type": "state", "value": "idle"})
+
+
+def _confirm_reminder(delay_seconds, subject):
+    """Acknowledge a scheduled reminder briefly, in character."""
+    if delay_seconds >= 3600:
+        when = f"{delay_seconds // 3600} hour(s)"
+    elif delay_seconds >= 60:
+        when = f"{delay_seconds // 60} minute(s)"
+    else:
+        when = f"{delay_seconds} seconds"
+    line = f"Noted. I'll tell you in {when}." if not subject else \
+           f"Noted — {subject}, in {when}."
+    emit({"type": "transcript_start", "role": "assistant"})
+    emit({"type": "transcript_delta", "text": line})
+    emit({"type": "transcript_end"})
+    print(f"[sevrin] {line}")
+    _speak_with_animation(line)
+    brain_llm.record_proactive(line)
+
+
+def _setup_proactive():
+    global proactive_queue
+    proactive_queue = proactive_mod.ProactiveQueue(
+        state_fn=current_state,
+        speak_fn=_speak_proactively,
+        judge_fn=brain_llm.judge_proactive,
+    )
+    proactive_queue.start()
+
+    global reminder_timers
+    reminder_timers = reminders_mod.ReminderTimers(proactive_queue)
+    reminder_timers.start()
+    print("[proactive] queue running")
+
+
 def _run_turn_chained(user_text: str):
     """Entry point for typed input. If SEVRIN gets interrupted while
     answering, the interruption becomes the next turn — same behaviour as
@@ -168,7 +243,22 @@ def _run_turn(user_text: str, interruption: dict = None):
     brain/llm.py's _interruption_context).
 
     Returns a dict describing an interruption if one occurred, else None."""
+    if proactive_queue is not None:
+        proactive_queue.note_user_activity()
     emit({"type": "transcript", "role": "user", "text": user_text})
+
+    # Reminder requests are handled here rather than by the model — the time
+    # has to be parsed exactly, and a scheduling error is worse than a clumsy
+    # phrasing. SEVRIN still confirms it in his own words.
+    if reminder_timers is not None:
+        scheduled = reminder_timers.schedule_from_text(user_text)
+        if scheduled:
+            delay, subject = scheduled
+            emit({"type": "state", "value": "thinking"})
+            _confirm_reminder(delay, subject)
+            emit({"type": "state", "value": "idle"})
+            return None
+
     emit({"type": "state", "value": "thinking"})
     print("[sevrin] ", end="", flush=True)
 
@@ -357,6 +447,10 @@ def _voice_loop():
         wake.close()
         if barge_listener_ref[0] is not None:
             barge_listener_ref[0].stop()
+        if proactive_queue is not None:
+            proactive_queue.stop()
+        if reminder_timers is not None:
+            reminder_timers.stop()
         audio_device.shutdown()
 
 
@@ -370,6 +464,8 @@ async def _main():
         emit({"type": "memory_event", "data": ev})
         emit({"type": "memory_stats", "data": memory_store.stats()})
     brain_llm.on_memory_event = _memory_event
+
+    _setup_proactive()
 
     # Bind the port BEFORE starting the voice loop. The old order started the
     # voice loop first, so on a port conflict the process would claim the

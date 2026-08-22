@@ -320,6 +320,11 @@ function handleMessage(msg) {
     case 'transcript': pushLine('user', msg.text); break;
     case 'transcript_start':
       activeAssistantLine = pushLine('assistant', '');
+      if (nextLineIsProactive) {
+        activeAssistantLine.classList.add('proactive');
+        activeAssistantLine.dataset.kind = nextLineIsProactive;
+        nextLineIsProactive = null;
+      }
       pickAnswerHue();
       break;
     case 'transcript_delta':
@@ -337,10 +342,20 @@ function handleMessage(msg) {
     case 'hud_alerts':    ALERTS = msg.data; renderAlerts(); break;
     case 'hud_meters':    METERS = msg.data; renderMeters(); break;
     case 'interrupted':   handleInterrupted(); break;
+    case 'proactive':     markProactive(msg.kind); break;
     case 'memory_event':  pushMemoryEvent(msg.data); break;
     case 'memory_stats':  memCountEl.textContent = msg.data.active_facts; break;
     case 'error': console.error('[backend error]', msg.message); break;
   }
+}
+
+let nextLineIsProactive = null;
+
+function markProactive(kind) {
+  // The next assistant line was SEVRIN speaking unprompted, not a reply.
+  // Worth distinguishing visually — otherwise it looks like he answered
+  // something you never asked.
+  nextLineIsProactive = kind || 'proactive';
 }
 
 function handleInterrupted() {
