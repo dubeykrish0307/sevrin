@@ -29,6 +29,7 @@ import numpy as np
 import config
 from voice import audio_device
 from voice.voice_id.verify import verify as verify_speaker, voiceprint_available, calibration_summary
+from voice.voice_id import verify as speaker_scores
 from voice import audio_gate
 
 FRAME_SAMPLES = 1280  # 80ms @ 16kHz — openWakeWord's native frame size
@@ -207,10 +208,11 @@ class WakeWordListener:
                         continue
                     if not ok:
                         print(f'[wake_word] heard "hey jarvis" from someone else '
-                              f'(voice {voice_score:.2f}, need {thr:.2f}) — ignoring')
+                              f'({speaker_scores.score_text(voice_score)}, need {thr:.2f}) — ignoring')
                         self._drain(stream, seconds=1.5, ring=ring)
                         continue
-                    print(f"[wake_word] voice confirmed ({voice_score:.2f} >= {thr:.2f})")
+                    print(f"[wake_word] voice confirmed "
+                          f"({speaker_scores.score_text(voice_score)} >= {thr:.2f})")
 
                 return "hey jarvis"
         finally:

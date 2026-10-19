@@ -28,46 +28,48 @@
       </div>
     </header>
 
-    <!-- LEFT HUD COLUMN: active tasks / operations -->
+    <!-- LEFT DRAWER: hidden by default, revealed on request or when relevant -->
     <aside class="hud-col hud-left">
-      <div class="hud-panel">
-        <div class="hud-panel-title">ACTIVE OPERATIONS</div>
+      <div class="hud-panel panel-schedule hidden-panel">
+        <div class="hud-panel-title">SCHEDULED</div>
         <div class="hud-tasks" id="hudTasks"></div>
       </div>
-      <div class="hud-panel">
-        <div class="hud-panel-title">MEMORY <span class="hud-count" id="memCount">0</span></div>
-        <div class="hud-memory" id="hudMemory"></div>
-      </div>
-      <div class="hud-panel">
+      <div class="hud-panel panel-system hidden-panel">
         <div class="hud-panel-title">SYSTEM</div>
         <div class="hud-meters" id="hudMeters"></div>
       </div>
     </aside>
 
-    <!-- CENTER STAGE -->
+    <!-- CENTER STAGE — always visible -->
     <main class="stage">
       <div id="orb-container"></div>
       <div class="speech-layer" id="speechLayer"></div>
       <div class="state-label" id="stateLabel">IDLE</div>
     </main>
 
-    <!-- RIGHT HUD COLUMN: alerts / telemetry -->
+    <!-- RIGHT DRAWER: hidden by default, revealed on request or when relevant -->
     <aside class="hud-col hud-right">
-      <div class="hud-panel">
+      <div class="hud-panel panel-memory hidden-panel">
+        <div class="hud-panel-title">MEMORY <span class="hud-count" id="memCount">0</span></div>
+        <div class="hud-memory" id="hudMemory"></div>
+      </div>
+      <div class="hud-panel panel-alerts hidden-panel">
         <div class="hud-panel-title">ALERTS</div>
         <div class="hud-alerts" id="hudAlerts"></div>
       </div>
-      <div class="hud-panel">
+      <div class="hud-panel panel-telemetry hidden-panel">
         <div class="hud-panel-title">TELEMETRY</div>
         <div class="hud-telemetry" id="hudTelemetry"></div>
       </div>
-      <div class="hud-panel hud-panel-log">
-        <div class="hud-panel-title">BACKEND LOG
-          <span class="log-file" id="logFile"></span>
-          <button class="log-open" id="openLogs" title="Open logs folder">⤢</button>
-        </div>
-        <div class="hud-log" id="hudLog"></div>
+    </aside>
+
+    <!-- BACKEND LOG — always visible, deliberately small and unobtrusive -->
+    <aside class="log-console">
+      <div class="log-console-title">LOG
+        <span class="log-file" id="logFile"></span>
+        <button class="log-open" id="openLogs" title="Open logs folder">⤢</button>
       </div>
+      <div class="hud-log" id="hudLog"></div>
     </aside>
 
     <div class="input-bar">

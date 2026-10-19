@@ -57,8 +57,18 @@ function closeLogFile() {
   }
 }
 
+// Progress indicators emit ANSI escapes ("[2K" etc). Harmless in a terminal,
+// but they clutter the log files that get shared for debugging.
+const ANSI = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
+
+function stripAnsi(s) {
+  return s.replace(ANSI, '').replace(/\[\d*[A-Z]/g, '').trim();
+}
+
 function writeLog(line) {
   if (!logStream) return;
+  line = stripAnsi(line);
+  if (!line) return;
   // timestamp each line so timing issues (latency, races) are diagnosable
   const t = new Date().toISOString().substr(11, 12);
   logStream.write(`[${t}] ${line}\n`);

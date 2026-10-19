@@ -1,5 +1,6 @@
 """
-Minimal always-on backend for the desktop UI (Phase 1).
+Backend service for the desktop UI — voice loop, memory, scheduling,
+proactive speech, and light UI control, all over one WebSocket.
 
 Runs the existing voice loop (wake word -> STT -> Claude -> TTS) in a
 background thread, exactly as main.py did, and broadcasts what's happening
@@ -13,9 +14,20 @@ WebSocket protocol (backend -> UI):
   {"type": "state", "value": "idle"|"listening"|"thinking"|"speaking"}
   {"type": "transcript", "role": "user", "text": "..."}            (one-shot, user turns)
   {"type": "transcript_start", "role": "assistant"}                (assistant reply begins)
-  {"type": "transcript_delta", "text": "..."}                      (one per packet, as generated)
-  {"type": "transcript_end"}                                       (assistant reply complete)
+  {"type": "transcript_delta", "text": "..."}                      (one per packet, emitted when
+                                                                     ITS AUDIO STARTS PLAYING, not
+                                                                     when Claude generated it —
+                                                                     keeps on-screen text and voice
+                                                                     in lockstep on long replies)
+  {"type": "transcript_end"}                                       (assistant reply complete —
+                                                                     fires after playback finishes,
+                                                                     not after generation finishes)
   {"type": "amplitude", "value": 0.0-1.0}                          (while speaking — see note below)
+  {"type": "ui_panel", "panel": NAME, "action": "show"|"hide",
+   "source": "assistant"|"auto"}                                   (reveal/hide a HUD panel — see
+                                                                     _handle_ui_directives and the
+                                                                     auto-triggers on scheduling/
+                                                                     memory events)
   {"type": "error", "message": "..."}
 
 (UI -> backend):
@@ -31,6 +43,7 @@ import json
 import os
 import queue
 import random
+import re
 import sys
 import threading
 import time
@@ -52,7 +65,7 @@ from brain.llm import ask_streaming_packets
 from brain import llm as brain_llm
 from brain import store as memory_store
 from backend import proactive as proactive_mod
-from backend import reminders as reminders_mod
+from backend import scheduler as scheduler_mod
 from voice import tts
 
 HOST = "localhost"
@@ -118,7 +131,10 @@ async def _handler(websocket):
             except ValueError:
                 continue
             if msg.get("type") == "text_input" and msg.get("text", "").strip():
-                threading.Thread(target=_run_turn_chained, args=(msg["text"].strip(),), daemon=True).start()
+                text = msg["text"].strip()
+                if _consume_if_ack(text):
+                    continue
+                threading.Thread(target=_run_turn_chained, args=(text,), daemon=True).start()
     finally:
         _clients.discard(websocket)
 
@@ -166,39 +182,127 @@ def _speak_with_animation(text: str):
 # ---------------------------------------------------------------------------
 
 proactive_queue = None
-reminder_timers = None
+scheduler = None
+
+# --- attention-check acknowledgment -----------------------------------
+# When SEVRIN speaks up unprompted about something that actually needs a
+# response (a timer, a reminder), she checks Krish is there first rather
+# than launching straight into it — the way a person would. Any input that
+# arrives while we're waiting counts as the acknowledgment and is consumed
+# silently rather than sent through the normal reply pipeline: "yeah?"
+# doesn't need or deserve a full generated answer, it just means "go on".
+_pending_ack = {"active": False}
+_ack_event = threading.Event()
+PROACTIVE_ACK_TIMEOUT = 12.0   # if he doesn't respond, deliver anyway rather than hang
+
+
+def _consume_if_ack(text: str) -> bool:
+    """Returns True if `text` was swallowed as an acknowledgment (caller
+    should NOT process it as a normal command). Works for both voice and
+    typed input — see the call sites in the voice loop and the websocket
+    handler."""
+    if _pending_ack["active"]:
+        _pending_ack["active"] = False
+        _ack_event.set()
+        print(f"[proactive] check-in acknowledged: {text!r}")
+        return True
+    return False
+
+
+def _speak_line(text: str, kind: str = None):
+    """Shared plumbing for anything SEVRIN says unprompted: emit the events,
+    speak it, log it, record it in history."""
+    emit({"type": "state", "value": "speaking"})
+    if kind:
+        emit({"type": "proactive", "text": text, "kind": kind})
+    emit({"type": "transcript_start", "role": "assistant"})
+    emit({"type": "transcript_delta", "text": text})
+    emit({"type": "transcript_end"})
+    print(f"[sevrin, unprompted] {text}")
+    try:
+        _speak_with_animation(text)
+    finally:
+        brain_llm.record_proactive(text)
 
 
 def _speak_proactively(item):
-    """Deliver one proactive item: SEVRIN phrases it himself, says it, and
-    it's recorded in conversation history so he doesn't repeat it or lose
-    the thread if Krish replies."""
-    line = brain_llm.phrase_proactive(item)
-
-    emit({"type": "state", "value": "speaking"})
-    emit({"type": "proactive", "text": line, "kind": item.kind})
-    emit({"type": "transcript_start", "role": "assistant"})
-    emit({"type": "transcript_delta", "text": line})
-    emit({"type": "transcript_end"})
-    print(f"[sevrin, unprompted] {line}")
-
+    """Locked entry point — see _turn_lock (defined near _run_turn below)."""
+    _turn_lock.acquire()
     try:
-        _speak_with_animation(line)
+        _speak_proactively_locked(item)
     finally:
-        brain_llm.record_proactive(line)
-        emit({"type": "state", "value": "idle"})
+        _turn_lock.release()
 
 
-def _confirm_reminder(delay_seconds, subject):
-    """Acknowledge a scheduled reminder briefly, in character."""
-    if delay_seconds >= 3600:
-        when = f"{delay_seconds // 3600} hour(s)"
-    elif delay_seconds >= 60:
-        when = f"{delay_seconds // 60} minute(s)"
+def _speak_proactively_locked(item):
+    """Deliver one proactive item.
+
+    For anything critical (a timer/reminder actually firing), this is now a
+    two-step delivery: get his attention, wait for a real acknowledgment,
+    THEN say what it's actually about — rather than blurting the content at
+    him the instant he might not even be listening. Lower-urgency items
+    (background info he didn't ask to be interrupted for) skip the check-in;
+    demanding his attention for something that doesn't need it would be
+    worse than the problem it solves.
+
+    Only ever called with _turn_lock already held — see _speak_proactively.
+    """
+    needs_ack = item.urgency == proactive_mod.CRITICAL
+
+    if needs_ack:
+        attention_line = brain_llm.phrase_attention_check(item)
+        _speak_line(attention_line, kind="check_in")
+
+        _ack_event.clear()
+        _pending_ack["active"] = True
+        emit({"type": "state", "value": "listening"})
+        got_ack = _ack_event.wait(timeout=PROACTIVE_ACK_TIMEOUT)
+        _pending_ack["active"] = False
+        if not got_ack:
+            print("[proactive] no response within timeout; delivering anyway")
+
+    line = brain_llm.phrase_proactive(item)
+    _speak_line(line, kind=item.kind)
+    emit({"type": "state", "value": "idle"})
+
+
+def _confirm_reminder(when_epoch, subject, recurrence=None):
+    """Acknowledge a scheduled reminder briefly, in character.
+
+    Says the time back deliberately: a misheard time is the failure mode that
+    matters here, and hearing it repeated is how he'd catch it."""
+    import time as _time
+    from datetime import datetime as _dt
+
+    delta = when_epoch - _time.time()
+    target = _dt.fromtimestamp(when_epoch)
+
+    if recurrence:
+        rtype = recurrence.get("type")
+        clock = target.strftime("%H:%M")
+        if rtype == "weekdays":
+            when = f"every weekday at {clock}"
+        elif rtype == "weekly":
+            when = f"every {target.strftime('%A')} at {clock}"
+        else:
+            when = f"every day at {clock}"
+    elif delta < 90:
+        when = f"in {int(delta)} seconds"
+    elif delta < 3600:
+        when = f"in {int(delta // 60)} minutes"
+    elif target.date() == _dt.now().date():
+        when = f"at {target.strftime('%H:%M')}"
     else:
-        when = f"{delay_seconds} seconds"
-    line = f"Noted. I'll tell you in {when}." if not subject else \
-           f"Noted — {subject}, in {when}."
+        when = f"{target.strftime('%A')} at {target.strftime('%H:%M')}"
+
+    # A timer with no subject reads oddly as "I'll tell you in 5 minutes" —
+    # he knows what he asked for; just confirm the duration.
+    if subject:
+        line = f"Noted — {subject}, {when}."
+    elif delta < 3600 and not recurrence:
+        line = f"Timer set, {when}."
+    else:
+        line = f"Noted. I'll tell you {when}."
     emit({"type": "transcript_start", "role": "assistant"})
     emit({"type": "transcript_delta", "text": line})
     emit({"type": "transcript_end"})
@@ -216,10 +320,51 @@ def _setup_proactive():
     )
     proactive_queue.start()
 
-    global reminder_timers
-    reminder_timers = reminders_mod.ReminderTimers(proactive_queue)
-    reminder_timers.start()
-    print("[proactive] queue running")
+    global scheduler
+    scheduler = scheduler_mod.Scheduler(proactive_queue)
+    scheduler.start()
+
+    # keep the UI's schedule panel in step with reality
+    def _push_schedules():
+        import time as _t
+        while True:
+            try:
+                rows = scheduler.upcoming(limit=4)
+                emit({"type": "schedules", "data": [
+                    {"subject": r["subject"] or "(no subject)",
+                     "due": r["next_due"],
+                     "recurring": bool(r.get("recurrence"))}
+                    for r in rows
+                ]})
+            except Exception:
+                pass
+            _t.sleep(5)
+
+    threading.Thread(target=_push_schedules, daemon=True).start()
+
+
+# Matches a directive Claude embeds directly in her reply text when she
+# decides a panel should be shown, e.g. "<<panel:schedule>>Here's what's
+# coming up." This is deliberately NOT full Anthropic tool-use — a proper
+# tool-call round trip means a second API request before any text streams
+# back, which costs real latency on every single reply, not just the ones
+# that touch a panel. A packet-level tag costs nothing extra and is stripped
+# before the text is ever spoken or shown, so it's invisible either way.
+_UI_DIRECTIVE = re.compile(r"<<panel:(\w+)>>")
+_VALID_PANELS = {"schedule", "memory", "system", "alerts", "telemetry"}
+
+
+def _handle_ui_directives(packet: str) -> str:
+    """Strips any panel directive out of a packet and emits the
+    corresponding UI event. Returns the cleaned packet — this MUST run
+    before the packet reaches TTS or the transcript, or a directive would
+    get spoken aloud."""
+    def _emit_and_drop(m):
+        panel = m.group(1).lower()
+        if panel in _VALID_PANELS:
+            emit({"type": "ui_panel", "panel": panel, "action": "show", "source": "assistant"})
+        return ""
+    return _UI_DIRECTIVE.sub(_emit_and_drop, packet).strip()
 
 
 def _run_turn_chained(user_text: str):
@@ -232,7 +377,27 @@ def _run_turn_chained(user_text: str):
         interruption = _run_turn(interruption["heard"], interruption=context)
 
 
+# One reply speaking at a time, globally. Without this, the voice loop and
+# the typed-input path (which spawns a fresh thread per message) had no
+# mutual exclusion — if the mic picked up speech (Krish, a friend,
+# background noise) while a typed message was also being answered, TWO
+# independent _run_turn calls could run concurrently, each spawning its own
+# ffplay process. That's genuine overlapping audio, not a display glitch.
+# _speak_proactively takes the same lock, so an unprompted remark can't
+# collide with a normal reply either.
+_turn_lock = threading.Lock()
+
+
 def _run_turn(user_text: str, interruption: dict = None):
+    """Locked entry point — see _turn_lock above."""
+    _turn_lock.acquire()
+    try:
+        return _run_turn_locked(user_text, interruption)
+    finally:
+        _turn_lock.release()
+
+
+def _run_turn_locked(user_text: str, interruption: dict = None):
     """Runs one exchange, pipelined so Claude keeps generating the next
     packet while the current one plays.
 
@@ -242,7 +407,8 @@ def _run_turn(user_text: str, interruption: dict = None):
     SEVRIN judge whether the unfinished part still mattered (see
     brain/llm.py's _interruption_context).
 
-    Returns a dict describing an interruption if one occurred, else None."""
+    Returns a dict describing an interruption if one occurred, else None.
+    Only ever called with _turn_lock already held — see _run_turn above."""
     if proactive_queue is not None:
         proactive_queue.note_user_activity()
     emit({"type": "transcript", "role": "user", "text": user_text})
@@ -250,14 +416,34 @@ def _run_turn(user_text: str, interruption: dict = None):
     # Reminder requests are handled here rather than by the model — the time
     # has to be parsed exactly, and a scheduling error is worse than a clumsy
     # phrasing. SEVRIN still confirms it in his own words.
-    if reminder_timers is not None:
-        scheduled = reminder_timers.schedule_from_text(user_text)
+    schedule_note = None
+    if scheduler is not None:
+        scheduled = scheduler.schedule_from_text(user_text)
         if scheduled:
-            delay, subject = scheduled
+            when, subject, recurrence = scheduled
             emit({"type": "state", "value": "thinking"})
-            _confirm_reminder(delay, subject)
+            _confirm_reminder(when, subject, recurrence)
+            # He just scheduled something — show him what's coming up without
+            # having to ask. This is deterministic (a schedule genuinely
+            # exists now), unlike the assistant-triggered <<panel:x>> tag.
+            emit({"type": "ui_panel", "panel": "schedule", "action": "show", "source": "auto"})
             emit({"type": "state", "value": "idle"})
             return None
+
+        # He asked for a reminder but the time couldn't be parsed. Without
+        # telling SEVRIN this, he has no idea a reminder was even attempted
+        # and will happily claim he "made a note of it" — which happened,
+        # and is exactly the fabrication the personality is meant to prevent.
+        if scheduler_mod.timeparse.looks_like_schedule(user_text):
+            schedule_note = (
+                "\n\n--- REMINDER NOT SET ---\n"
+                "He appears to be asking for a reminder, timer or alarm, but the "
+                "time could not be parsed, so NOTHING has been scheduled. Do not "
+                "say you've noted it, set it, or will remind him — none of that is "
+                "true. Do NOT say you're unable to set timers or reminders either; "
+                "you can, this phrasing just didn't parse. Ask him to restate the "
+                "time, plainly, in one short sentence."
+            )
 
     emit({"type": "state", "value": "thinking"})
     print("[sevrin] ", end="", flush=True)
@@ -317,6 +503,14 @@ def _run_turn(user_text: str, interruption: dict = None):
                 # actually playing, so we don't catch the tail of his own
                 # command as an "interruption"
                 barge.start(on_interrupt)
+            # Emit the on-screen text HERE, when this packet's audio is
+            # actually about to start — not when Claude generated it. Text
+            # generation runs far ahead of speech (Claude can produce several
+            # sentences in the time it takes to voice one), so emitting from
+            # the generation loop made later sentences appear on screen while
+            # an earlier one was still being spoken. Tying display to
+            # playback keeps text and voice in lockstep.
+            emit({"type": "transcript_delta", "text": prepared})
             _speak_with_animation(prepared)
             if not interrupted.is_set():
                 with spoken_lock:
@@ -328,24 +522,27 @@ def _run_turn(user_text: str, interruption: dict = None):
     playback_thread.start()
 
     emit({"type": "transcript_start", "role": "assistant"})
-    for packet in ask_streaming_packets(user_text, interruption=interruption):
+    for packet in ask_streaming_packets(user_text, interruption=interruption,
+                                        extra_context=schedule_note):
+        packet = _handle_ui_directives(packet)
         all_packets.append(packet)
         if interrupted.is_set():
             # stop pulling more from Claude — he's been cut off
             break
         print(packet, end=" ", flush=True)
-        emit({"type": "transcript_delta", "text": packet})
         text_queue.put(packet)
-    emit({"type": "transcript_end"})
     print()
 
     text_queue.put(None)
     fetch_thread.join(timeout=5)
     playback_thread.join(timeout=5)
     barge.stop()
+    # The reply is only really "done" once the audio for it has finished
+    # playing, not once Claude finished generating text — so signal the end
+    # of the transcript here, after playback_thread has joined.
+    emit({"type": "transcript_end"})
 
     if not interrupted.is_set():
-        barge.stop()   # stop listening, but keep the object (see barge_listener_ref)
         emit({"type": "state", "value": "idle"})
         return None
 
@@ -437,6 +634,9 @@ def _voice_loop():
                     break
 
                 print(f"[backend] you said: {text}")
+                if _consume_if_ack(text):
+                    emit({"type": "state", "value": "listening"})
+                    continue
                 pending_interruption = _run_turn(text)
                 if pending_interruption is None:
                     emit({"type": "state", "value": "listening"})
@@ -449,9 +649,14 @@ def _voice_loop():
             barge_listener_ref[0].stop()
         if proactive_queue is not None:
             proactive_queue.stop()
-        if reminder_timers is not None:
-            reminder_timers.stop()
+        if scheduler is not None:
+            scheduler.stop()
         audio_device.shutdown()
+        try:
+            from voice import stt_whispercpp
+            stt_whispercpp.stop_server()
+        except Exception:
+            pass   # not the active backend, or never started — nothing to clean up
 
 
 async def _main():
@@ -463,6 +668,10 @@ async def _main():
     def _memory_event(ev):
         emit({"type": "memory_event", "data": ev})
         emit({"type": "memory_stats", "data": memory_store.stats()})
+        # Only surface the panel for outcomes worth seeing — a rejected or
+        # duplicate candidate isn't something to interrupt the screen for.
+        if ev.get("outcome") in ("stored", "updated"):
+            emit({"type": "ui_panel", "panel": "memory", "action": "show", "source": "auto"})
     brain_llm.on_memory_event = _memory_event
 
     _setup_proactive()

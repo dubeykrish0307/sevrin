@@ -30,6 +30,7 @@ import webrtcvad
 
 import config
 from voice.voice_id.verify import verify as verify_speaker, voiceprint_available
+from voice.voice_id import verify as speaker_scores
 from voice import audio_gate
 from voice import audio_device
 
@@ -134,7 +135,8 @@ class BargeInListener:
                         # either way, not an interruption we should honour
                         speech_run = 0
                         continue
-                    print(f"[barge_in] interruption from Krish (voice {score:.2f} >= {thr:.2f})")
+                    print(f"[barge_in] interruption from Krish "
+                          f"({speaker_scores.score_text(score)} >= {thr:.2f})")
                 else:
                     print("[barge_in] interruption detected (no voiceprint — can't verify speaker)")
 

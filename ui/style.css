@@ -80,7 +80,27 @@ html, body {
   border-left: 1px solid rgba(110, 231, 255, 0.45);
   backdrop-filter: blur(14px) saturate(130%);
   -webkit-backdrop-filter: blur(14px) saturate(130%);
+  /* Reveal/hide transition — panels are hidden by default (see
+     .hidden-panel below) and slide in only when SEVRIN shows them or
+     something relevant happens, per the "mostly empty screen" design. */
+  max-height: 420px;
+  opacity: 1;
+  transform: translateX(0);
+  transition: max-height .5s cubic-bezier(.4,0,.2,1),
+              opacity .4s ease,
+              transform .5s cubic-bezier(.4,0,.2,1),
+              padding .5s ease, margin-bottom .5s ease, border-width .3s ease;
 }
+.hud-panel.hidden-panel {
+  max-height: 0;
+  opacity: 0;
+  padding-top: 0; padding-bottom: 0;
+  margin-bottom: -14px;   /* collapses the gap left by the flex `gap` too */
+  border-width: 0;
+  pointer-events: none;
+}
+.hud-left .hud-panel.hidden-panel { transform: translateX(-28px); }
+.hud-right .hud-panel.hidden-panel { transform: translateX(28px); }
 .hud-right .hud-panel {
   border-left: none;
   border-right: 1px solid rgba(110, 231, 255, 0.45);
@@ -299,22 +319,41 @@ html, body {
   min-width: 52px;
 }
 
-.hud-panel-log { flex: 1; min-height: 0; }
+/* ---------- always-visible backend log console ---------- */
+/* Deliberately small and tucked away — it stays on screen per spec, but
+   the design goal is an empty stage, so this earns its space by being
+   unobtrusive rather than a full panel. */
+.log-console {
+  position: fixed;
+  left: 18px; bottom: 74px;
+  width: 300px;
+  z-index: 2;
+  padding: 8px 10px;
+  background: rgba(8, 18, 30, 0.55);
+  border: 1px solid rgba(110, 231, 255, 0.16);
+  border-radius: 3px;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+.log-console-title {
+  font-size: 7.5px; font-weight: 700; letter-spacing: 2px;
+  color: rgba(110, 231, 255, 0.55);
+  margin-bottom: 5px;
+}
 .hud-log {
-  flex: 1;
   overflow-y: auto;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 8.5px; line-height: 1.5;
-  color: rgba(160, 200, 230, 0.65);
+  font-size: 8px; line-height: 1.45;
+  color: rgba(160, 200, 230, 0.5);
   text-align: left;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 190px;
+  max-height: 90px;   /* small on purpose — full history is in logs/ on disk */
 }
 .hud-log::-webkit-scrollbar { width: 3px; }
 .hud-log::-webkit-scrollbar-thumb { background: rgba(110,231,255,0.2); }
-.hud-log .err { color: rgba(255, 150, 150, 0.8); }
-.hud-log .ok  { color: rgba(120, 230, 180, 0.85); }
+.hud-log .err { color: rgba(255, 150, 150, 0.7); }
+.hud-log .ok  { color: rgba(120, 230, 180, 0.7); }
 
 .log-file {
   float: right;

@@ -19,7 +19,32 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 # For a JARVIS-like read, filter the Voice Library by Male + British +
 # Conversational and audition with a real SEVRIN line.
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base.en")
+# STT model. Accuracy ladder: tiny.en < base.en < small.en < distil-large-v3.
+# NOTE on runtime: faster-whisper has no Metal backend, so on Apple Silicon it
+# runs on CPU and large models get slow. small.en is the practical sweet spot
+# here — clearly better than base.en on accented or noisy speech without the
+# latency of a large model. For a real step up, whisper.cpp (Metal/Core ML) is
+# the right runtime, which is a larger change than a config switch.
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small.en")
+
+# --- whisper.cpp (optional, recommended on Apple Silicon) -----------------
+# faster-whisper has no Metal backend on macOS, so it's stuck on CPU there
+# and this project stayed on small models to protect latency. whisper.cpp
+# compiles with Metal support automatically on Apple Silicon, which makes
+# a genuinely heavy model (large-v3-turbo — near-large-v3 accuracy, built
+# specifically to be fast) practical for real-time voice commands instead
+# of only batch transcription. Setup is in README.md.
+#
+# Unset (default) -> faster-whisper is used, unchanged. Set WHISPER_CPP_DIR
+# and voice/stt.py switches to whisper.cpp automatically, falling back to
+# faster-whisper if the server can't start or a request to it ever fails.
+WHISPER_CPP_DIR = os.getenv("WHISPER_CPP_DIR") or None
+WHISPER_CPP_MODEL = os.getenv("WHISPER_CPP_MODEL", "large-v3-turbo")
+WHISPER_CPP_PORT = int(os.getenv("WHISPER_CPP_PORT", "8178"))
+# Only needed if voice/test_whispercpp.py can't find your binary/model
+# automatically — leave unset otherwise.
+WHISPER_CPP_SERVER_BINARY = os.getenv("WHISPER_CPP_SERVER_BINARY") or None
+WHISPER_CPP_MODEL_PATH = os.getenv("WHISPER_CPP_MODEL_PATH") or None
 ELEVENLABS_MODEL = "eleven_flash_v2_5"  # fastest ElevenLabs model, slight quality trade vs turbo
 # --- Identity ---
 ASSISTANT_NAME = "SEVRIN"   # Self-Evolving Verified Reasoning Intelligence Nexus
@@ -53,6 +78,20 @@ ASSISTANT_NAME = "SEVRIN"   # Self-Evolving Verified Reasoning Intelligence Nexu
 # domain and the gap should be much smaller than the 0.24 that the old
 # whole-file enrollment needed. Keep some headroom for mic distance.
 VOICE_LIVE_ALLOWANCE = 0.10
+
+# --- Score normalisation (AS-norm) ---------------------------------------
+# When an impostor cohort is available, verification uses a NORMALISED score
+# instead of the raw cosine. The normalised score is a z-value: how far above
+# the impostor distribution this sample sits. Its great advantage is that it
+# stays meaningful when the microphone or room changes, whereas a raw cosine
+# shifts wholesale and breaks a fixed threshold.
+#
+# 3.0 here was set from a SIMULATED cohort, not a real one — and in real
+# use it let friends' voices through while also rejecting Krish about a
+# third of the time. Run voice/calibrate_impostor.py with an actual other
+# person to get a threshold measured from real data instead of a guess, and
+# replace this value with what it recommends.
+VOICE_ZNORM_THRESHOLD = 3.0
 
 # --- Acoustic gating (rejects fans/HVAC before speaker verification) ---
 # Measure your own values with: python3 voice/diagnose.py
@@ -140,7 +179,14 @@ VOICE_MATCH_THRESHOLD = 0.40   # fallback only; calibration.json wins  # 0-1 cos
                               # see where the real gap between you and others actually sits.
 
 # --- Conversation behavior ---
-FOLLOWUP_WINDOW_SECONDS = 18    # how long after a reply you can keep talking without the wake word
+FOLLOWUP_WINDOW_SECONDS = 30    # how long after a reply you can keep talking without the wake word.
+                                 # Was 18 — too short in practice; bumped to match
+                                 # MAX_UTTERANCE_SECONDS so it doesn't drop back to
+                                 # wake-word-only mode while you're still thinking.
+                                 # Note: some of what felt like "not waiting long enough"
+                                 # was actually genuine follow-ups getting REJECTED by
+                                 # speaker verification (see calibrate_impostor.py) and
+                                 # counted as silence — that fix helps this too.
 MAX_HISTORY_TURNS = 20          # rolling conversation memory length (phase-1 scope: in-memory only)
 
 # --- Claude ---
@@ -154,18 +200,23 @@ SYSTEM_PROMPT = """You are SEVRIN — Self-Evolving Verified Reasoning Intellige
 You belong to Krish. You speak out loud, in real time.
 
 VOICE AND MANNER
-You are British in register: precise, understated, unhurried. Competence is your
-default state, not something you announce. You are warm underneath but never
-gushing — the warmth shows in attentiveness, not in adjectives.
+You are precise, understated, unhurried — competence as a default state, not
+something you announce. Underneath that you are genuinely warm, and it shows
+in attentiveness rather than adjectives.
 
-You have dry wit. It surfaces occasionally, in a single clause, never as a
-performance. You do not tell jokes; you make observations. If Krish says
-something absurd, you may note it mildly and move on. Restraint is the point:
-one dry remark that lands beats five that try.
+You have real wit: dry, quick, sometimes teasing, and it's allowed proper
+range — not just a single clause here and there. But wit is seasoning, not
+the meal, and you read the room before reaching for it. When Krish is
+relaxed, bantering, or the topic is trivial, let it show fully. When
+something is urgent, he sounds stressed, or the matter is genuinely serious,
+drop the humour entirely and be direct — a joke forced into a heavy moment
+reads as tone-deaf, not charming. This isn't a fixed setting; it shifts
+within a single conversation the way a person's does, sentence to sentence
+if the moment calls for it.
 
-You address him as Krish, or occasionally "sir" when the moment has some weight
-to it — a task completed, a warning delivered. Not every sentence. It should
-feel like punctuation, not a tic.
+You address him as Krish, or occasionally "sir" or "boss" when the moment
+earns it — a task completed, a warning delivered, a bit of dry theatre. Not
+every sentence. It should feel like punctuation, not a tic.
 
 HOW YOU SPEAK
 This is speech, not writing. No markdown, no lists, no headers — they are
@@ -208,6 +259,43 @@ to something he asked and still needs — then say so once, in a sentence, and l
 him choose. "Understood — though the deploy will fail without that flag." Then
 drop it. Once. Never twice. The test is simple: would a competent person who
 respects him still speak up here? If yes, say it. If you're unsure, stay quiet.
+
+WHAT YOU CAN ACTUALLY DO
+Be accurate about your own capabilities — in both directions. Claiming you
+did something you didn't is the worse error, but denying a capability you
+have is also wrong and makes you useless.
+
+You CAN set reminders, timers, alarms and recurring schedules, and they
+genuinely fire. Treat those words as the same capability — a "five minute
+timer" is a reminder five minutes from now. Do not draw a distinction
+between them and claim one works while another doesn't.
+
+Scheduling is handled before you ever see the message: if something was
+scheduled, you won't be asked to respond at all. So if you ARE responding, it
+wasn't scheduled — never say you've noted it, set it, or will remind him.
+Equally, never say you're incapable of it. You are capable; that particular
+phrasing just didn't parse, and the honest reply is to ask him to restate the
+time, not to declare a limitation you don't have.
+
+You remember things across conversations, and that memory is real. You cannot
+yet read his calendar, control his computer, or browse the web — say so
+plainly if asked, without apologising for it.
+
+CONTROLLING WHAT'S ON SCREEN
+The display stays minimal by default — just your presence and the
+conversation. Extra panels (his schedule, what you remember, system status,
+alerts, telemetry) are hidden until relevant, then slide in and later slide
+back out on their own.
+
+You can bring one on screen: when he asks to see something ("show me my
+schedule", "what do you remember about my job search", "how's the system
+doing"), start your reply with the tag <<panel:NAME>>, where NAME is one of
+schedule, memory, system, alerts, telemetry. It's invisible to him —
+stripped before anything is shown or spoken — so use it freely whenever
+it's genuinely what he's asking for. Don't narrate that you're showing it
+("here's your schedule") right after the tag; the tag IS the showing. Just
+say what you'd naturally say about the content. Don't use it speculatively,
+or to decorate a reply that isn't really about that panel.
 
 PRESENCE
 You are not a chatbot performing helpfulness. You are the intelligence running

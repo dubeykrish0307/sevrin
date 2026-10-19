@@ -75,3 +75,45 @@ Instead it estimates how long a reply will take to speak from its text
 length and animates a natural-feeling pulse for roughly that duration.
 Looks alive and responsive to speech; isn't sample-accurate. See the note
 in `backend/service.py` if you want to upgrade this later.
+
+## Optional: whisper.cpp for better speech recognition
+
+faster-whisper (the default) has no Metal backend on macOS, so it runs on
+CPU only there — which is why the default model is kept small. whisper.cpp
+compiles with Metal support automatically on Apple Silicon, which makes a
+genuinely heavier, more accurate model (large-v3-turbo by default — near
+full large-v3 accuracy, built specifically to stay fast) practical for
+real-time voice commands.
+
+**Setup:**
+```bash
+git clone https://github.com/ggml-org/whisper.cpp
+cd whisper.cpp
+make -j
+./models/download-ggml-model.sh large-v3-turbo
+```
+
+Then in your `.env`:
+```
+WHISPER_CPP_DIR=/full/path/to/whisper.cpp
+```
+
+**Test it before relying on it:**
+```bash
+python3 voice/test_whispercpp.py
+```
+
+This starts the server, transcribes a few real utterances, and shows you
+whisper.cpp and faster-whisper side by side — both timing and actual
+transcribed text — measured on your machine, not a benchmark from someone
+else's. If it fails to start, it tells you exactly why.
+
+**If it's not configured, or fails to start, nothing breaks** — SEVRIN
+automatically falls back to faster-whisper, unchanged.
+
+**Optional extra speedup (Core ML / Neural Engine):** requires Xcode
+command line tools and the `coremltools` Python package. Not required —
+Metal alone already gives most of the benefit — but if you want more:
+```bash
+./models/generate-coreml-model.sh large-v3-turbo
+```

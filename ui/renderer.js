@@ -100,11 +100,8 @@ const hudTelemetryEl = document.getElementById('hudTelemetry');
 const hudMemoryEl = document.getElementById('hudMemory');
 const memCountEl = document.getElementById('memCount');
 
-let TASKS = [
-  { name: 'INDEXING PROJECT FILES', progress: 0.62, eta: 214 },
-  { name: 'CALENDAR SYNC', progress: 0.88, eta: 47 },
-  { name: 'VOICE MODEL WARM', progress: 1.0, eta: 0 },
-];
+// Populated from real scheduled reminders via the 'schedules' message.
+let TASKS = [{ name: 'NOTHING SCHEDULED', progress: 0, eta: 0 }];
 
 let ALERTS = [
   { level: 'warn', text: 'Standup in 25 min' },
@@ -119,9 +116,31 @@ let METERS = [
 ];
 
 function fmtEta(sec) {
-  if (sec <= 0) return 'COMPLETE';
+  if (sec <= 0) return 'DUE';
+  if (sec >= 86400) return `in ${Math.floor(sec / 86400)}d`;
+  if (sec >= 3600) return `in ${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
   const m = Math.floor(sec / 60), s = sec % 60;
-  return m > 0 ? `ETA ${m}m ${String(s).padStart(2, '0')}s` : `ETA ${s}s`;
+  return m > 0 ? `in ${m}m ${String(s).padStart(2, '0')}s` : `in ${s}s`;
+}
+
+function renderSchedules(rows) {
+  // Real scheduled reminders replace the mock task list — this panel now
+  // shows something true rather than decorative.
+  if (!rows || !rows.length) {
+    TASKS = [{ name: 'NOTHING SCHEDULED', progress: 0, eta: 0 }];
+    renderTasks();
+    return;
+  }
+  const now = Date.now() / 1000;
+  TASKS = rows.map((r) => {
+    const secs = Math.max(0, Math.round(r.due - now));
+    return {
+      name: (r.recurring ? '↻ ' : '') + r.subject.toUpperCase().slice(0, 26),
+      progress: 1,
+      eta: secs,
+    };
+  });
+  renderTasks();
 }
 
 function renderTasks() {
@@ -210,11 +229,10 @@ function fmtUptime() {
 
 // tick the mock data so the HUD feels live
 setInterval(() => {
+  // TASKS are real schedules pushed from the backend now, so only count
+  // their ETA down — never fabricate progress for them.
   TASKS.forEach((t) => {
-    if (t.eta > 0) {
-      t.eta = Math.max(0, t.eta - 1);
-      t.progress = Math.min(1, t.progress + 0.002 + Math.random() * 0.003);
-    }
+    if (t.eta > 0) t.eta = Math.max(0, t.eta - 1);
   });
   METERS.forEach((m) => {
     const drift = (Math.random() - 0.5) * 0.06;
@@ -271,7 +289,58 @@ const MAX_LINES = 3;
 const LINE_LIFETIME_MS = 9000;
 let activeAssistantLine = null;
 
+// ==================================================================
+// PANEL REVEAL SYSTEM
+// Panels are hidden by default (see the .hidden-panel CSS). They slide in
+// when: (a) SEVRIN explicitly shows one because he asked to see it, or
+// (b) something contextually relevant happens (a schedule gets created, a
+// memory fact gets stored). Each has its own on-screen duration, and if a
+// panel is showing when a NEW, unrelated question comes in, it's given a
+// short grace period rather than staying open indefinitely — long enough
+// to glance away and back, not so long it lingers after he's moved on.
+// ==================================================================
+
+const PANEL_DURATIONS = {
+  schedule: 40000,
+  memory: 9000,     // meant to be a brief flash, not a lingering panel
+  system: 22000,
+  alerts: 22000,
+  telemetry: 22000,
+};
+const GRACE_ON_NEW_TURN_MS = 6000;
+const _panelTimers = {};
+
+function showPanel(name) {
+  const el = document.querySelector(`.panel-${name}`);
+  if (!el) return;
+  el.classList.remove('hidden-panel');
+  clearTimeout(_panelTimers[name]);
+  _panelTimers[name] = setTimeout(() => hidePanel(name), PANEL_DURATIONS[name] || 20000);
+}
+
+function hidePanel(name) {
+  const el = document.querySelector(`.panel-${name}`);
+  if (!el) return;
+  el.classList.add('hidden-panel');
+  clearTimeout(_panelTimers[name]);
+}
+
+function graceCloseOpenPanels() {
+  // Called when a new user turn starts. Any panel currently open gets a
+  // short countdown instead of its full duration — if SEVRIN's reply to
+  // this new turn re-shows the same panel, showPanel() above resets it
+  // back to full duration and the grace timer is simply overwritten.
+  Object.keys(PANEL_DURATIONS).forEach((name) => {
+    const el = document.querySelector(`.panel-${name}`);
+    if (el && !el.classList.contains('hidden-panel')) {
+      clearTimeout(_panelTimers[name]);
+      _panelTimers[name] = setTimeout(() => hidePanel(name), GRACE_ON_NEW_TURN_MS);
+    }
+  });
+}
+
 function pushLine(role, text) {
+  if (role === 'user') graceCloseOpenPanels();
   const el = document.createElement('div');
   el.className = `speech-line ${role}`;
   el.textContent = text;
@@ -341,8 +410,13 @@ function handleMessage(msg) {
     case 'hud_tasks':     TASKS = msg.data;  renderTasks();  break;
     case 'hud_alerts':    ALERTS = msg.data; renderAlerts(); break;
     case 'hud_meters':    METERS = msg.data; renderMeters(); break;
+    case 'ui_panel':
+      if (msg.action !== 'hide') showPanel(msg.panel);
+      else hidePanel(msg.panel);
+      break;
     case 'interrupted':   handleInterrupted(); break;
     case 'proactive':     markProactive(msg.kind); break;
+    case 'schedules':     renderSchedules(msg.data); break;
     case 'memory_event':  pushMemoryEvent(msg.data); break;
     case 'memory_stats':  memCountEl.textContent = msg.data.active_facts; break;
     case 'error': console.error('[backend error]', msg.message); break;

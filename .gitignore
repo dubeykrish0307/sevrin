@@ -13,3 +13,5 @@ data/*
 !data/.gitkeep
 node_modules/
 **/node_modules/
+logs/
+whisper.cpp/

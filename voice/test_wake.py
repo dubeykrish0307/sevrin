@@ -50,6 +50,16 @@ def main():
         return
 
     from voice.voice_id import encoder as enc
+    from voice.voice_id import cohort as cohort_mod
+    coh = cohort_mod.load()
+    if coh is not None:
+        src = cohort_mod.source()
+        quality = ("realistic human voices" if src == "elevenlabs"
+                   else "synthetic system voices — blunter reference")
+        print(f"score normalisation: ON ({len(coh)} {src} voices, {quality})")
+    else:
+        print("score normalisation: OFF — recognition will be sensitive to")
+        print("  changes of microphone or room. Re-run enroll.py to build it.")
     cal = speaker.calibration_summary() or {}
     print(f"speaker model : {enc.backend_name()}")
     print(f"voiceprint    : {cal.get('n_clips','?')} clips, "
@@ -88,8 +98,8 @@ def main():
         if score is None:
             print("      voice: unscoreable (too short/quiet)")
         else:
-            scores.append(score)
-            print(f"      voice: {score:.3f} vs threshold {thr:.3f}  "
+            scores.append(speaker.score_value(score))
+            print(f"      voice: {speaker.score_text(score)} vs threshold {thr:.2f}  "
                   f"{'PASS' if ok else 'FAIL'}")
         print()
 
@@ -102,7 +112,8 @@ def main():
         print(f"  gate passed       : {sum(gates)}/{len(gates)}")
     if scores:
         arr = np.array(scores)
-        thr = speaker.threshold_for(clip_seconds)
+        thr = (float(getattr(config, "VOICE_ZNORM_THRESHOLD", 3.0))
+               if coh is not None else speaker.threshold_for(clip_seconds))
         passed_n = int((arr >= thr).sum())
         print(f"  voice scores      : min {arr.min():.3f}  mean {arr.mean():.3f}  max {arr.max():.3f}")
         print(f"  threshold in use  : {thr:.3f}")
@@ -119,10 +130,16 @@ def main():
             print("  VERDICT: borderline. Some attempts pass, some don't — you'll")
             print("  experience this as 'it works sometimes'. Re-record enrollment")
             print("  with more variety in distance and volume.")
-        margin = arr.mean() - 0.30
-        print(f"\n  margin over a typical impostor (~0.30): {margin:.2f}")
-        if margin < 0.15:
-            print("  That's thin — a similar-sounding person could get through.")
+        if coh is not None:
+            print(f"\n  normalised scores are z-values: impostors sit near 0,")
+            print(f"  you're averaging {arr.mean():.1f}. Margin: {arr.mean():.1f} sigma.")
+            if arr.mean() < 4:
+                print("  Thinner than ideal — more varied enrollment would help.")
+        else:
+            margin = arr.mean() - 0.30
+            print(f"\n  margin over a typical impostor (~0.30): {margin:.2f}")
+            if margin < 0.15:
+                print("  That's thin — a similar-sounding person could get through.")
 
 
 if __name__ == "__main__":

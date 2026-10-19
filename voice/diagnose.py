@@ -114,7 +114,7 @@ def main():
             if score is None:
                 print("      voice: could not score (too short/quiet)")
             else:
-                voice_scores.append(score)
+                voice_scores.append(speaker.score_value(score))
                 print(f"      voice: {score:.3f} vs threshold {thr:.3f}  "
                       f"{'PASS' if ok else 'FAIL'}")
         print()
@@ -134,16 +134,21 @@ def main():
         print(f"  dB above floor    : min {min(db_margins):.1f}  "
               f"mean {np.mean(db_margins):.1f}")
 
+    from voice.voice_id import cohort as cohort_mod
+    normalised = cohort_mod.load() is not None
+
     if voice_scores:
-        print(f"\nSpeaker verification on live clips:")
-        print(f"  min {min(voice_scores):.3f}  mean {np.mean(voice_scores):.3f}  "
-              f"max {max(voice_scores):.3f}")
-        cal = speaker.calibration_summary() or {}
-        thr = cal.get("threshold", config.VOICE_MATCH_THRESHOLD)
+        unit = "z" if normalised else "cosine"
+        print(f"\nSpeaker verification on live clips ({unit} scores):")
+        print(f"  min {min(voice_scores):.2f}  mean {np.mean(voice_scores):.2f}  "
+              f"max {max(voice_scores):.2f}")
+        thr = (float(getattr(config, "VOICE_ZNORM_THRESHOLD", 3.0)) if normalised
+               else (speaker.calibration_summary() or {}).get(
+                   "threshold", config.VOICE_MATCH_THRESHOLD))
         below = sum(1 for v in voice_scores if v < thr)
         if below:
             print(f"  {below}/{len(voice_scores)} of YOUR OWN clips scored below "
-                  f"the threshold {thr:.3f}")
+                  f"the threshold {thr:.2f}")
 
     print("\nRECOMMENDED config.py values based on what was just measured:")
     if band_ratios:
@@ -160,13 +165,23 @@ def main():
         print(f"  GATE_MAX_FLATNESS     = {rec_flat:.2f}")
         print(f"  GATE_NOISE_MARGIN_DB  = {rec_db:.1f}")
     if voice_scores:
-        rec_voice = max(0.45, min(voice_scores) - 0.05)
-        print(f"  VOICE_MATCH_THRESHOLD = {rec_voice:.2f}   "
-              f"(fallback; calibration.json normally wins)")
-        print("\n  If that recommended voice threshold is much lower than your")
-        print("  enrollment threshold, your enrollment clips don't resemble how")
-        print("  you actually speak to SEVRIN — re-record enrollment the way you")
-        print("  really talk to it, rather than lowering the threshold.")
+        if normalised:
+            # z-scores live on a completely different scale from raw cosine —
+            # recommending a raw threshold from them would be meaningless.
+            rec_z = max(2.0, min(voice_scores) - 1.0)
+            print(f"  VOICE_ZNORM_THRESHOLD = {rec_z:.1f}   "
+                  f"(your lowest was {min(voice_scores):.2f}; impostors sit near 0)")
+            if min(voice_scores) < 3:
+                print("\n  One or more of your own clips scored low. Re-recording")
+                print("  enrollment across the conditions you actually use — different")
+                print("  microphones, distances, rooms — would widen the margin.")
+        else:
+            rec_voice = max(0.45, min(voice_scores) - 0.05)
+            print(f"  VOICE_MATCH_THRESHOLD = {rec_voice:.2f}   "
+                  f"(fallback; calibration.json normally wins)")
+            print("\n  If that recommended threshold is much lower than your")
+            print("  enrollment threshold, your enrollment clips don't resemble how")
+            print("  you actually speak to SEVRIN — re-record rather than lowering it.")
 
 
 if __name__ == "__main__":

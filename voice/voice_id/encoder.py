@@ -84,12 +84,36 @@ def _load():
     _backend = "resemblyzer"
 
 
+def normalize_level(audio: np.ndarray, target_rms: float = 0.06):
+    """Bring audio to a consistent loudness before embedding.
+
+    Recording level varies enormously between a built-in mic at arm's length
+    and an earbud mic against the cheek, and that level difference alone
+    moves the embedding. Normalising removes one of the larger sources of
+    cross-device variation before it ever reaches the model.
+    """
+    if audio is None or audio.size == 0:
+        return audio
+    rms = float(np.sqrt(np.mean(audio ** 2)))
+    if rms < 1e-6:
+        return audio
+    gain = target_rms / rms
+    # don't amplify noise wildly on near-silent input
+    gain = min(gain, 20.0)
+    out = audio * gain
+    peak = float(np.abs(out).max())
+    if peak > 0.99:
+        out = out * (0.99 / peak)
+    return out
+
+
 def embed(audio: np.ndarray, sample_rate: int = 16000):
     """audio: float32 mono in [-1, 1] at 16kHz. Returns a unit-norm embedding,
     or None if the audio can't be embedded."""
     _load()
     if audio is None or audio.size == 0:
         return None
+    audio = normalize_level(audio)
 
     if _backend == "ecapa":
         import torch

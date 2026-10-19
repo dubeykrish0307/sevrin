@@ -13,6 +13,7 @@ Now memory-backed:
     several verification API calls, and doing that inline would add seconds
     of latency to every reply. Memory formation must never slow speech.
 """
+import os
 import re
 import threading
 
@@ -32,6 +33,30 @@ def _split_sentences(buffer: str):
     complete = parts[:-1]
     remainder = parts[-1] if parts else ""
     return complete, remainder
+
+
+_CORE_PROFILE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "krish_profile.md"
+)
+_core_profile_cache = None
+
+
+def _core_profile() -> str:
+    """The static, hand-authored facts about Krish (data/krish_profile.md).
+    Distinct from the dynamic, extracted-and-verified facts in
+    _memory_context(): this is trusted because he wrote it directly, not
+    because it survived the extraction pipeline. Cached in memory since the
+    file rarely changes and there's no reason to hit disk every turn — edit
+    the file and restart to pick up changes."""
+    global _core_profile_cache
+    if _core_profile_cache is None:
+        try:
+            with open(_CORE_PROFILE_PATH, encoding="utf-8") as f:
+                content = f.read().strip()
+            _core_profile_cache = f"\n\n{content}" if content else ""
+        except Exception:
+            _core_profile_cache = ""
+    return _core_profile_cache
 
 
 def _memory_context() -> str:
@@ -82,7 +107,8 @@ def _interruption_context(intr: dict) -> str:
     return "\n".join(block)
 
 
-def ask_streaming_packets(user_text: str, interruption: dict = None):
+def ask_streaming_packets(user_text: str, interruption: dict = None,
+                          extra_context: str = None):
     """interruption, when present, describes a reply of SEVRIN's that Krish
     cut off: what he'd managed to say, what he hadn't reached yet, and what
     Krish said over him. It's handed to the model as context so SEVRIN can
@@ -94,10 +120,12 @@ def ask_streaming_packets(user_text: str, interruption: dict = None):
     # history now comes from disk, not a module-level list
     history = store.recent_turns(limit=config.MAX_HISTORY_TURNS)
 
-    system_prompt = config.SYSTEM_PROMPT + _memory_context()
+    system_prompt = config.SYSTEM_PROMPT + _core_profile() + _memory_context()
 
     if interruption:
         system_prompt += _interruption_context(interruption)
+    if extra_context:
+        system_prompt += extra_context
 
     buffer = ""
     full_reply = ""
@@ -199,6 +227,38 @@ def judge_proactive(item, situation: dict) -> bool:
     return decision
 
 
+_ATTENTION_SYSTEM = """You are SEVRIN, about to interrupt Krish's attention
+unprompted for something that needs a real response from him — not just
+background chatter. Before saying what it's about, say ONE short line that
+checks he's actually there and paying attention, in character: warm, direct,
+maybe a little dry. The way a person checks in before launching into
+something, not a notification chime.
+
+Do NOT reveal what the actual matter is yet — that comes after he responds.
+Vary your phrasing; don't say the exact same check-in every time.
+
+Output only the line itself."""
+
+
+def phrase_attention_check(item) -> str:
+    """The line SEVRIN says to get his attention BEFORE delivering a
+    time-sensitive proactive item — see backend/service.py's
+    _speak_proactively for why this two-step exists."""
+    try:
+        resp = _client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=60,
+            system=_ATTENTION_SYSTEM + _core_profile(),
+            messages=[{"role": "user", "content":
+                       f"You're about to tell him about a {item.kind}."}],
+        )
+        line = "".join(b.text for b in resp.content if hasattr(b, "text")).strip()
+        return line or "You there?"
+    except Exception as e:
+        print(f"[proactive] attention phrasing failed ({e}); using fallback")
+        return "You there?"
+
+
 _PHRASE_SYSTEM = """You are SEVRIN, speaking to Krish unprompted — he did not
 ask you anything; you are the one starting this.
 
@@ -219,7 +279,7 @@ def phrase_proactive(item) -> str:
         resp = _client.messages.create(
             model=config.CLAUDE_MODEL,
             max_tokens=120,
-            system=_PHRASE_SYSTEM + _memory_context(),
+            system=_PHRASE_SYSTEM + _core_profile() + _memory_context(),
             messages=[{"role": "user", "content":
                        f"Facts to convey ({item.kind}): {item.summary}"}],
         )

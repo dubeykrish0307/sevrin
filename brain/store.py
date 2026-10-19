@@ -68,6 +68,23 @@ def _init(conn):
 
     CREATE INDEX IF NOT EXISTS idx_facts_status  ON facts(status);
     CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject);
+
+    -- Scheduled items: reminders and recurring tasks. Persisted so they
+    -- survive a restart; the in-memory timers they replace silently lost
+    -- everything when the backend stopped.
+    CREATE TABLE IF NOT EXISTS schedules (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_ts  REAL NOT NULL,
+        subject     TEXT NOT NULL,        -- what to remind him about
+        next_due    REAL NOT NULL,        -- epoch seconds
+        recurrence  TEXT,                 -- JSON, NULL for one-shot
+        status      TEXT NOT NULL,        -- 'active' | 'done' | 'cancelled'
+        last_fired  REAL,
+        source_text TEXT                  -- what he actually said, for debugging
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sched_due    ON schedules(next_due);
+    CREATE INDEX IF NOT EXISTS idx_sched_status ON schedules(status);
     """)
     conn.commit()
 
@@ -170,3 +187,71 @@ def stats():
     turns = c.execute("SELECT COUNT(*) n FROM conversations").fetchone()["n"]
     facts = c.execute("SELECT COUNT(*) n FROM facts WHERE status='active'").fetchone()["n"]
     return {"turns": turns, "active_facts": facts}
+
+
+# ---------------- schedules ----------------
+
+def add_schedule(subject: str, next_due: float, recurrence: dict = None,
+                 source_text: str = None) -> int:
+    c = _conn()
+    cur = c.execute(
+        """INSERT INTO schedules
+           (created_ts, subject, next_due, recurrence, status, source_text)
+           VALUES (?, ?, ?, ?, 'active', ?)""",
+        (time.time(), subject, next_due,
+         json.dumps(recurrence) if recurrence else None, source_text),
+    )
+    c.commit()
+    return cur.lastrowid
+
+
+def due_schedules(now: float = None):
+    """Active schedules whose time has come."""
+    now = now if now is not None else time.time()
+    c = _conn()
+    rows = c.execute(
+        "SELECT * FROM schedules WHERE status = 'active' AND next_due <= ? ORDER BY next_due",
+        (now,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def active_schedules():
+    c = _conn()
+    rows = c.execute(
+        "SELECT * FROM schedules WHERE status = 'active' ORDER BY next_due"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def next_due_time():
+    """When the soonest active schedule fires, or None. Lets the scheduler
+    sleep until exactly then instead of polling."""
+    c = _conn()
+    row = c.execute(
+        "SELECT MIN(next_due) AS t FROM schedules WHERE status = 'active'"
+    ).fetchone()
+    return row["t"] if row and row["t"] is not None else None
+
+
+def mark_fired(schedule_id: int, next_due: float = None):
+    """Record a firing. Pass next_due to reschedule (recurring), omit to
+    close it out (one-shot)."""
+    c = _conn()
+    if next_due is None:
+        c.execute(
+            "UPDATE schedules SET status='done', last_fired=? WHERE id=?",
+            (time.time(), schedule_id),
+        )
+    else:
+        c.execute(
+            "UPDATE schedules SET next_due=?, last_fired=? WHERE id=?",
+            (next_due, time.time(), schedule_id),
+        )
+    c.commit()
+
+
+def cancel_schedule(schedule_id: int):
+    c = _conn()
+    c.execute("UPDATE schedules SET status='cancelled' WHERE id=?", (schedule_id,))
+    c.commit()

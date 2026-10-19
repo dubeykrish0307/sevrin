@@ -154,7 +154,7 @@ def main():
             # bumped whenever the embedding PIPELINE changes (not just the
             # model), since a profile built without silence-trimming isn't
             # comparable to live audio that is trimmed
-            "pipeline_version": 4,
+            "pipeline_version": 5,
             "n_clips": int(len(embeddings)),
             "n_dropped": len(dropped),
             "genuine_mean": mean,
@@ -170,6 +170,17 @@ def main():
           f"range {scores.min():.3f}-{scores.max():.3f}")
     print(f"  chosen threshold:  {threshold:.3f}")
     print(f"\nSaved to {PROFILE_DIR}/")
+
+    # Build the impostor cohort used for score normalisation. This is what
+    # keeps recognition working when the microphone or room changes — see
+    # voice/voice_id/cohort.py.
+    try:
+        from voice.voice_id import cohort as cohort_mod
+        cohort_mod.build(force=True)
+    except Exception as e:
+        print(f"\n  (cohort build skipped: {e})")
+        print("  Recognition will still work, but will be more sensitive to")
+        print("  changes of microphone or environment.")
 
     if std > 0.10:
         print("\n  NOTE: your remaining clips still vary a lot. Inconsistent mic")

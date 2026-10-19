@@ -26,6 +26,7 @@ import numpy as np
 
 import config
 from voice.voice_id import encoder as enc
+from voice.voice_id import cohort as cohort_mod
 
 PROFILE_DIR = os.path.join(os.path.dirname(__file__), "profile")
 PROFILE_PATH = os.path.join(PROFILE_DIR, "voiceprint.npy")
@@ -35,6 +36,19 @@ CALIBRATION_PATH = os.path.join(PROFILE_DIR, "calibration.json")
 _centroid = None
 _embeddings = None
 _calibration = None
+_cohort = None
+_cohort_enroll_stats = None   # (mean, std) of enrollment-vs-cohort scores
+
+# AS-norm compares against the top-N most similar impostors rather than all
+# of them; using the closest ones makes the normalisation sharper.
+# Fraction of the cohort to compare against, not a fixed count. With the
+# earlier fixed value of 12 against a 24-voice cohort, ANY test sample was
+# being compared against fully half the cohort — too broad a slice for a
+# sharp reference, and part of why real friends were scoring close enough
+# to pass. A smaller proportional slice compares against genuinely the
+# closest-sounding impostors, which is what AS-norm is supposed to do.
+COHORT_TOP_FRACTION = 0.20
+COHORT_TOP_N_MIN = 5
 
 # Short clips give noisier embeddings — but note the penalty here RAISES the
 # bar, and enrollment clips are longer than live wake clips, so stacking a
@@ -64,11 +78,19 @@ def _load():
         else:
             # older enrollment without per-clip data — degrade to centroid only
             _embeddings = _centroid.reshape(1, -1)
+    global _cohort, _cohort_enroll_stats
+    if _cohort is None:
+        _cohort = cohort_mod.load()
+        if _cohort is not None and _centroid is not None:
+            n = max(COHORT_TOP_N_MIN, int(len(_cohort) * COHORT_TOP_FRACTION))
+            sims = np.sort(_cohort @ _centroid)[-n:]
+            _cohort_enroll_stats = (float(sims.mean()), float(sims.std()) or 1e-6)
+
     if _calibration is None:
         if os.path.exists(CALIBRATION_PATH):
             with open(CALIBRATION_PATH) as f:
                 _calibration = json.load(f)
-            if _calibration.get("pipeline_version", 1) < 4:
+            if _calibration.get("pipeline_version", 1) < 5:
                 raise RuntimeError(
                     "Voiceprint was built with an older embedding pipeline and its "
                     "scores are not comparable. "
@@ -142,19 +164,66 @@ def voice_similarity(pcm_bytes: bytes, sample_rate: int = 16000):
     if emb is None:
         return None
 
-    # centroid scoring — see the module docstring for why this beats top-K
-    return float(np.dot(_centroid, emb))
+    raw = float(np.dot(_centroid, emb))
+
+    # --- AS-norm ---------------------------------------------------------
+    # Without normalisation the raw cosine shifts whenever the microphone or
+    # room changes, so a fixed threshold rejects the right person on a
+    # different device. Expressing the score relative to how this same audio
+    # scores against other speakers cancels most of that channel effect:
+    # when conditions shift, the impostor scores shift too.
+    if _cohort is not None and _cohort_enroll_stats is not None:
+        n = max(COHORT_TOP_N_MIN, int(len(_cohort) * COHORT_TOP_FRACTION))
+        test_sims = np.sort(_cohort @ emb)[-n:]
+        t_mean, t_std = float(test_sims.mean()), float(test_sims.std()) or 1e-6
+        e_mean, e_std = _cohort_enroll_stats
+        z = 0.5 * (((raw - t_mean) / t_std) + ((raw - e_mean) / e_std))
+        return {"raw": raw, "z": z, "normalized": True}
+
+    return {"raw": raw, "z": None, "normalized": False}
 
 
 def verify(pcm_bytes: bytes, sample_rate: int = 16000):
-    """Returns (is_krish, score, threshold_used). score/threshold are None
-    when the sample couldn't be scored at all."""
-    score = voice_similarity(pcm_bytes, sample_rate)
-    if score is None:
+    """Returns (is_krish, score, threshold_used).
+
+    When AS-norm is available the decision is made on the NORMALISED score,
+    which is stable across microphones and rooms. The raw cosine is still
+    reported for logging, since it's the number that's comparable with the
+    enrollment statistics."""
+    result = voice_similarity(pcm_bytes, sample_rate)
+    if result is None:
         return False, None, None
+
+    if isinstance(result, dict) and result.get("normalized"):
+        z = result["z"]
+        thr = float(getattr(config, "VOICE_ZNORM_THRESHOLD", 3.0))
+        return (z >= thr), result, thr
+
+    raw = result["raw"] if isinstance(result, dict) else result
     duration = len(pcm_bytes) / 2 / sample_rate
     thr = threshold_for(duration)
-    return (score >= thr), score, thr
+    return (raw >= thr), result, thr
+
+
+def score_value(result):
+    """The single number to threshold on / average, whichever scoring path
+    produced it: the normalised z when available, else the raw cosine."""
+    if result is None:
+        return None
+    if isinstance(result, dict):
+        return result["z"] if result.get("normalized") else result["raw"]
+    return result
+
+
+def score_text(result) -> str:
+    """Human-readable score for logs, whichever scoring path was used."""
+    if result is None:
+        return "unscoreable"
+    if isinstance(result, dict):
+        if result.get("normalized"):
+            return f"z={result['z']:.2f} (raw {result['raw']:.2f})"
+        return f"{result['raw']:.2f}"
+    return f"{result:.2f}"
 
 
 def is_my_voice(pcm_bytes: bytes, sample_rate: int = 16000) -> bool:

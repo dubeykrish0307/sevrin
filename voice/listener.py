@@ -133,8 +133,8 @@ class UtteranceListener:
                 if score is None:
                     print("[listener] ignored: couldn't verify speaker (sample too short/quiet)")
                 else:
-                    print(f"[listener] ignored: not Krish (voice {score:.2f}, need {thr:.2f})")
+                    print(f"[listener] ignored: not Krish ({speaker.score_text(score)}, need {thr:.2f})")
                 return b""
-            print(f"[listener] speaker confirmed (voice {score:.2f} >= {thr:.2f})")
+            print(f"[listener] speaker confirmed ({speaker.score_text(score)} >= {thr:.2f})")
 
         return audio
