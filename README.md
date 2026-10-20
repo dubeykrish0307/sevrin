@@ -1,119 +1,118 @@
-# JARVIS
+# SEVRIN
 
-## Layout
+**A real-time voice assistant that checks it's my voice, remembers only what it can verify, and knows when to stay quiet.**
+
+SEVRIN (Self-Evolving Verified Reasoning Intelligence Nexus) runs on my MacBook. A Python asyncio backend runs the voice loop, and an Electron app shows the conversation. Speech-to-text and speaker verification run locally; Claude does the reasoning.
+
+> Demo video: coming soon.
+
+---
+
+## What it does
+
+| Part | How it works |
+|---|---|
+| Wake word | openWakeWord, streaming on 80 ms frames (pretrained "hey jarvis" model; a custom "hey sevrin" model is planned) |
+| Noise gate | Rejects fans and room hum before anything else runs, using a speech-band energy ratio |
+| Speaker verification | ECAPA-TDNN embeddings (SpeechBrain) with AS-norm score normalisation against an impostor cohort, so a new mic or room doesn't break the threshold |
+| Speech-to-text | faster-whisper by default; optional resident whisper.cpp server (large-v3-turbo, Metal on Apple Silicon) with automatic fallback |
+| Reasoning | Claude (Haiku 4.5, chosen for time-to-first-token in a live voice loop) |
+| Memory | SQLite conversations + a separate facts table. Every fact passes layered checks before it's stored (see below) |
+| Speaking | Sentence-by-sentence streaming TTS (macOS `say` or ElevenLabs), so audio starts after the first sentence |
+| Barge-in | You can interrupt it while it's speaking |
+| Proactive speech | Reminders and alerts go through a queue that decides *when* to speak (see below) |
+| Desktop app | Electron + three.js orb, chat panel and text input over a local WebSocket |
+
+## Design decisions
+
+**Memory that can say no.** A memory system that confidently stores wrong things about you is worse than none. A candidate fact must survive:
+1. a cheap filter (greetings and small talk never reach the model),
+2. extraction with verbatim evidence,
+3. a separate grounding check against the actual transcript,
+4. a contradiction check against stored facts (update or reject),
+5. a confidence threshold.
+
+**Proactive speech: rules first, the LLM only for real dilemmas.** Expired items are dropped. Deterministic rules handle the clear cases (I'm mid-sentence: wait; nothing is happening: speak). Only the ambiguous middle reaches the model, which keeps latency and cost down and the decisions predictable.
+
+**Measure, then set thresholds.** Thresholds in `config.py` come from recordings, not guesses. Two examples:
+- The noise gate: my speech measured a band ratio of 0.44–0.66 against 0.24–0.29 for fan rumble, so the cut-off sits at 0.30.
+- Speaker verification: a threshold set from a *simulated* impostor cohort let friends' voices through in real use. `voice/calibrate_impostor.py` now sets it from recordings of real people.
+
+## What I'm measuring next
+
+- [ ] Speech-to-text benchmark: word error rate and latency, faster-whisper vs whisper.cpp, on ~50 of my own commands
+- [ ] Speaker verification: false-accept and false-reject rates with 3–5 other people
+- [ ] 90-second demo video
+- [ ] Tests and CI
+
+## Architecture
 
 ```
-config.py          shared config — every module imports from here
-main.py             terminal entrypoint (still works, voice-only, no UI)
-voice/              wake word, mic recording, STT, TTS, speaker verification
-brain/              the LLM client (llm.py); memory.py not built yet
-connections/        not built yet — computer control, internet, reminders, other tools
-backend/            service.py — WebSocket server that runs the voice loop and
-                    talks to the desktop app
-ui/                 Electron desktop app — orb, chat panel, text input
-data/               gitignored — runtime state (logs, memory db, etc.)
+mic ─► noise gate ─► wake word ─► speaker verification ─► speech-to-text
+                                                              │
+                     ┌──────── memory (SQLite) ◄──────────────┤
+                     ▼                                        ▼
+            proactive queue ─────────────────────────► Claude reasoning
+                                                              │
+speaker ◄── streaming TTS ◄──────────── sentence packets ◄────┘
+   ▲
+   └── barge-in: speaking stops when I start talking
+
+backend/service.py  ◄── WebSocket ws://localhost:8765 ──►  ui/ (Electron)
 ```
 
-## Setup
+## Project layout
+
+```
+config.py        every tunable threshold, with the measurement behind it
+main.py          terminal-only entry point (voice, no app)
+backend/         WebSocket service, proactive speech queue, reminder scheduler, time parsing
+brain/           Claude client, fact extraction and verification, SQLite store
+voice/           wake word, noise gate, listener, STT (faster-whisper / whisper.cpp), TTS, barge-in
+voice/voice_id/  enrolment, ECAPA encoder, verification, impostor cohort
+ui/              Electron desktop app
+```
+
+## Privacy
+
+Voice recordings, the enrolled voiceprint, session logs and the memory database stay on the machine. They're in `.gitignore` and never committed.
+
+## Run it
+
+Requires macOS, Python 3.11, Node.js and an Anthropic API key.
 
 ```bash
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # fill in ANTHROPIC_API_KEY (and ELEVENLABS_API_KEY if using that backend)
-```
+cp .env.example .env          # add ANTHROPIC_API_KEY
 
-## Enroll your voice (do this before running anything else)
-
-```bash
+# enrol your voice first
 python3 voice/voice_id/record.py
 python3 voice/voice_id/enroll.py
-```
 
-## Run — with the app (recommended)
-
-Two processes, both need to be running:
-
-```bash
-# terminal 1 — the backend
-source venv/bin/activate
+# terminal 1: backend
 python3 backend/service.py
+
+# terminal 2: app
+cd ui && npm install && npm start
 ```
 
-```bash
-# terminal 2 — the app (first time only: cd ui && npm install)
-cd ui
-npm install   # first time only
-npm start
-```
+Say "hey jarvis" or type into the text bar. Both go through the same pipeline.
 
-The app connects to the backend over `ws://localhost:8765`. The status
-dot in the top-right turns green once connected. You can talk ("hey
-jarvis...") or type into the text bar — both go through the same
-pipeline and both talk back out loud.
+### Optional: whisper.cpp for better speech recognition
 
-Two terminal windows is not the end state — Phase 2+ moves the backend to
-a proper background service (launchd) so this becomes one double-click.
-For now, both need to stay open.
+faster-whisper has no Metal backend on macOS, so it runs on CPU there. whisper.cpp compiles with Metal on Apple Silicon, which makes large-v3-turbo fast enough for live commands.
 
-## Run — terminal only (no app)
-
-```bash
-python3 main.py
-```
-
-Still works exactly as before, if you just want to test voice without the app.
-
-## Tuning
-
-All the knobs are in `config.py`, with comments.
-
-## Note on the orb's "speaking" animation
-
-It does not decode real audio to react to the literal waveform — that
-would need MP3 decoding and precise sync with `ffplay`'s playback buffer.
-Instead it estimates how long a reply will take to speak from its text
-length and animates a natural-feeling pulse for roughly that duration.
-Looks alive and responsive to speech; isn't sample-accurate. See the note
-in `backend/service.py` if you want to upgrade this later.
-
-## Optional: whisper.cpp for better speech recognition
-
-faster-whisper (the default) has no Metal backend on macOS, so it runs on
-CPU only there — which is why the default model is kept small. whisper.cpp
-compiles with Metal support automatically on Apple Silicon, which makes a
-genuinely heavier, more accurate model (large-v3-turbo by default — near
-full large-v3 accuracy, built specifically to stay fast) practical for
-real-time voice commands.
-
-**Setup:**
 ```bash
 git clone https://github.com/ggml-org/whisper.cpp
-cd whisper.cpp
-make -j
+cd whisper.cpp && make -j
 ./models/download-ggml-model.sh large-v3-turbo
 ```
 
-Then in your `.env`:
-```
-WHISPER_CPP_DIR=/full/path/to/whisper.cpp
-```
+Add `WHISPER_CPP_DIR=/full/path/to/whisper.cpp` to `.env`, then compare both engines on your own machine:
 
-**Test it before relying on it:**
 ```bash
 python3 voice/test_whispercpp.py
 ```
 
-This starts the server, transcribes a few real utterances, and shows you
-whisper.cpp and faster-whisper side by side — both timing and actual
-transcribed text — measured on your machine, not a benchmark from someone
-else's. If it fails to start, it tells you exactly why.
-
-**If it's not configured, or fails to start, nothing breaks** — SEVRIN
-automatically falls back to faster-whisper, unchanged.
-
-**Optional extra speedup (Core ML / Neural Engine):** requires Xcode
-command line tools and the `coremltools` Python package. Not required —
-Metal alone already gives most of the benefit — but if you want more:
-```bash
-./models/generate-coreml-model.sh large-v3-turbo
-```
+If whisper.cpp isn't configured or fails to start, SEVRIN falls back to faster-whisper automatically.
