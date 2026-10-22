@@ -1,42 +1,32 @@
-"""
-Run this first: `python3 voice/voice_id/record.py`
+"""Step 1 of enrolment: python3 voice/voice_id/record.py
 
-Records you saying each wake phrase several times, plus a stretch of
-natural free speech. More variety = a more reliable voiceprint. Takes
-about 3-4 minutes. Everything stays in voice/voice_id/recordings/ on this
-machine — nothing is sent anywhere.
+Records the wake phrase several times plus a minute of free speech, into
+voice/voice_id/recordings/. Takes 3-4 minutes. Nothing leaves the machine.
 """
 import os
 import sys
 import time
 import wave
-import pyaudio
 
-# voice/voice_id/record.py -> voice/voice_id -> voice -> project root.
-# One level deeper than before now that voice_id lives under voice/.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 import config
+from voice import audio_device
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "recordings")
 SAMPLE_RATE = 16000
 REPS_PER_PHRASE = 6
+PHRASE_SECONDS = 3.5        # the voiceprint uses 2.5 s windows, so 2 s clips were too short to window
 FREE_SPEECH_SECONDS = 60
 
 
-def record_clip(pa, seconds, path):
-    stream = pa.open(rate=SAMPLE_RATE, channels=1, format=pyaudio.paInt16,
-                      input=True, frames_per_buffer=1024)
-    frames = []
-    for _ in range(int(SAMPLE_RATE / 1024 * seconds)):
-        frames.append(stream.read(1024, exception_on_overflow=False))
-    stream.close()
-
-    wf = wave.open(path, "wb")
-    wf.setnchannels(1)
-    wf.setsampwidth(pa.get_sample_size(pyaudio.paInt16))
-    wf.setframerate(SAMPLE_RATE)
-    wf.writeframes(b"".join(frames))
-    wf.close()
+def record_clip(seconds, path):
+    audio = audio_device.record(seconds, rate=SAMPLE_RATE)
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(audio)
 
 
 def countdown(n=2):
@@ -48,46 +38,40 @@ def countdown(n=2):
 
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    pa = pyaudio.PyAudio()
     clip_index = 0
 
     print("=== Voice enrollment ===")
     print("Recording you saying each wake phrase, then some free speech.")
     print("Everything stays on this machine.\n")
-    print("Each wake-phrase capture is 3.5s and the free-speech one is 60s.")
-    print("Longer recordings matter: the voiceprint is built from 2.5s windows")
-    print("sliced out of them, matching the length of a live wake clip, and a")
-    print("2s capture is too short to window.\n")
-    print("HOW TO GET A STRONG VOICEPRINT — this decides how well SEVRIN can")
-    print("tell you apart from other people, so it's worth doing properly:")
+    print(f"Each wake-phrase capture is {PHRASE_SECONDS}s and the free-speech one is "
+          f"{FREE_SPEECH_SECONDS}s.\n")
+    print("For a strong voiceprint (this decides how well SEVRIN can tell you")
+    print("apart from other people):")
     print("  * quiet room, no fan or music running")
-    print("  * VARY it deliberately: some clips close to the mic, some further")
-    print("    back; some normal volume, some quieter; sitting and standing")
+    print("  * vary it: some clips close to the mic, some further back; some at")
+    print("    normal volume, some quieter; sitting and standing")
     print("  * speak naturally, don't over-enunciate")
-    print("The variety matters more than the count — a voiceprint built only")
-    print("from one distance and tone will reject you the moment you move.\n")
+    print("Variety matters more than count. A voiceprint from one distance and")
+    print("tone will reject you the moment you move.\n")
 
     for phrase in config.WAKE_PHRASES:
-        print(f'\nPhrase: "{phrase}" — say it {REPS_PER_PHRASE} times, one at a time.')
+        print(f'\nPhrase: "{phrase}", say it {REPS_PER_PHRASE} times, one at a time.')
         for rep in range(REPS_PER_PHRASE):
             input(f'  [{rep + 1}/{REPS_PER_PHRASE}] Press Enter, then say "{phrase}" '
-                  f'(keep talking briefly after — say it, pause, say it again)...')
+                  f'(keep talking briefly after: say it, pause, say it again)...')
             countdown()
-            path = os.path.join(OUTPUT_DIR, f"clip_{clip_index:03d}.wav")
-            record_clip(pa, 3.5, path)
+            record_clip(PHRASE_SECONDS, os.path.join(OUTPUT_DIR, f"clip_{clip_index:03d}.wav"))
             clip_index += 1
 
-    print(f"\nLast step: talk normally for {FREE_SPEECH_SECONDS} seconds — describe")
-    print("your day, read something out loud, whatever. This is the most")
-    print("valuable clip of the lot: continuous natural speech characterises")
-    print("your voice far better than short repeated phrases, so don't rush it")
-    print("and don't read in a flat monotone.")
+    print(f"\nLast step: talk normally for {FREE_SPEECH_SECONDS} seconds. Describe")
+    print("your day, read something out loud, whatever. This is the most useful")
+    print("clip: continuous natural speech describes your voice far better than")
+    print("short repeated phrases, so don't rush it or read in a monotone.")
     input("Press Enter when ready...")
     countdown()
-    path = os.path.join(OUTPUT_DIR, f"clip_{clip_index:03d}.wav")
-    record_clip(pa, FREE_SPEECH_SECONDS, path)
+    record_clip(FREE_SPEECH_SECONDS, os.path.join(OUTPUT_DIR, f"clip_{clip_index:03d}.wav"))
+    audio_device.shutdown()
 
-    pa.terminate()
     print(f"\nDone. Recorded {clip_index + 1} clips to {OUTPUT_DIR}/")
     print("Next: run `python3 voice/voice_id/enroll.py`")
 

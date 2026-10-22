@@ -1,9 +1,13 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
-const { spawn } = require('child_process');
+// Electron main process: the window, starting/stopping the Python backend,
+// per-session log files, and hot reload while developing.
+const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { spawn, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
 const PROJECT_ROOT = path.join(__dirname, '..');
+const LOG_DIR = path.join(PROJECT_ROOT, 'logs');
+const BACKEND_PORT = 8765;
 
 let win = null;
 let backendProc = null;
@@ -11,15 +15,9 @@ let backendStatus = 'stopped';
 let logStream = null;
 let currentLogPath = null;
 
-// ---------------------------------------------------------------------------
-// Session logs
-// Every backend run gets its own numbered file in logs/ — "Test 1.log",
-// "Test 2.log", and so on — so a whole session can be handed over as a file
-// instead of scraped out of a terminal buffer. Numbering continues from
-// whatever's already there rather than restarting at 1.
-// ---------------------------------------------------------------------------
-
-const LOG_DIR = path.join(PROJECT_ROOT, 'logs');
+// --- session logs -----------------------------------------------------------
+// Each backend run gets its own numbered file, logs/Test N.log, so a whole
+// session can be shared as a file instead of copied out of a terminal.
 
 function nextLogPath() {
   fs.mkdirSync(LOG_DIR, { recursive: true });
@@ -35,12 +33,12 @@ function openLogFile() {
   try {
     currentLogPath = nextLogPath();
     logStream = fs.createWriteStream(currentLogPath, { flags: 'a' });
-    const header =
-      `=== SEVRIN session log ===\n` +
+    logStream.write(
+      '=== SEVRIN session log ===\n' +
       `started : ${new Date().toISOString()}\n` +
       `file    : ${path.basename(currentLogPath)}\n` +
-      `${'='.repeat(40)}\n`;
-    logStream.write(header);
+      `${'='.repeat(40)}\n`,
+    );
     return path.basename(currentLogPath);
   } catch (e) {
     console.warn('could not open log file:', e.message);
@@ -50,15 +48,13 @@ function openLogFile() {
 }
 
 function closeLogFile() {
-  if (logStream) {
-    logStream.write(`\n=== session ended ${new Date().toISOString()} ===\n`);
-    logStream.end();
-    logStream = null;
-  }
+  if (!logStream) return;
+  logStream.write(`\n=== session ended ${new Date().toISOString()} ===\n`);
+  logStream.end();
+  logStream = null;
 }
 
-// Progress indicators emit ANSI escapes ("[2K" etc). Harmless in a terminal,
-// but they clutter the log files that get shared for debugging.
+// progress bars from model downloads leave ANSI escapes that clutter the log
 const ANSI = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
 
 function stripAnsi(s) {
@@ -67,27 +63,18 @@ function stripAnsi(s) {
 
 function writeLog(line) {
   if (!logStream) return;
-  line = stripAnsi(line);
-  if (!line) return;
-  // timestamp each line so timing issues (latency, races) are diagnosable
-  const t = new Date().toISOString().substr(11, 12);
-  logStream.write(`[${t}] ${line}\n`);
+  const clean = stripAnsi(line);
+  if (!clean) return;
+  const time = new Date().toISOString().slice(11, 23);
+  logStream.write(`[${time}] ${clean}\n`);
 }
 
-// ---------------------------------------------------------------------------
-// Backend process control
-// ---------------------------------------------------------------------------
+// --- backend process ----------------------------------------------------------
 
 function pythonPath() {
-  // Prefer the project venv so the backend gets the right dependencies even
-  // when Electron was launched from a shell without the venv activated.
-  const candidates = [
-    path.join(PROJECT_ROOT, 'venv', 'bin', 'python3'),
-    path.join(PROJECT_ROOT, 'venv', 'bin', 'python'),
-    'python3',
-  ];
-  for (const c of candidates) {
-    if (c === 'python3' || fs.existsSync(c)) return c;
+  // prefer the project venv, so it works even if Electron wasn't started from it
+  for (const candidate of ['python3', 'python'].map((p) => path.join(PROJECT_ROOT, 'venv', 'bin', p))) {
+    if (fs.existsSync(candidate)) return candidate;
   }
   return 'python3';
 }
@@ -102,24 +89,23 @@ function sendLog(line) {
   if (win && !win.isDestroyed()) win.webContents.send('backend:log', line);
 }
 
+// A backend left running from a terminal keeps the port, and a new one would
+// die with "address already in use". Kill whatever holds it first.
 function freePort(port) {
-  // A backend left running from an earlier terminal session keeps holding
-  // 8765, and the new one dies instantly with "address already in use".
-  // Clear it first so the button always works instead of silently failing.
   try {
-    const { execSync } = require('child_process');
     const pids = execSync(`lsof -ti:${port} || true`, { encoding: 'utf8' })
       .split('\n').map((x) => x.trim()).filter(Boolean);
     for (const pid of pids) {
-      // never kill ourselves
       if (parseInt(pid, 10) === process.pid) continue;
       try {
         execSync(`kill -9 ${pid}`);
         sendLog(`[ui] freed port ${port} (killed stale process ${pid})`);
-      } catch (e) { /* already gone */ }
+      } catch {
+        // already gone
+      }
     }
     return pids.length;
-  } catch (e) {
+  } catch {
     return 0;
   }
 }
@@ -131,12 +117,12 @@ function startBackend() {
   const logName = openLogFile();
   setStatus('starting');
   if (logName) sendLog(`[ui] logging this session to logs/${logName}`);
-  freePort(8765);
+  freePort(BACKEND_PORT);
   sendLog(`[ui] starting backend with ${py}`);
 
   backendProc = spawn(py, ['backend/service.py'], {
     cwd: PROJECT_ROOT,
-    env: { ...process.env, PYTHONUNBUFFERED: '1' },  // so logs stream live
+    env: { ...process.env, PYTHONUNBUFFERED: '1' },   // stream logs live
   });
 
   backendProc.stdout.on('data', (d) => {
@@ -145,7 +131,7 @@ function startBackend() {
     if (text.includes('websocket server on')) setStatus('running');
   });
   backendProc.stderr.on('data', (d) => {
-    d.toString().split('\n').filter(Boolean).forEach((l) => sendLog(l));
+    d.toString().split('\n').filter(Boolean).forEach(sendLog);
   });
   backendProc.on('exit', (code) => {
     sendLog(`[ui] backend exited (code ${code})`);
@@ -165,10 +151,10 @@ function startBackend() {
 function stopBackend() {
   if (!backendProc) return { ok: true, already: true };
   sendLog('[ui] stopping backend');
-  backendProc.kill('SIGTERM');
-  // SIGTERM can hang if the backend is mid-audio; force it shortly after
   const proc = backendProc;
-  setTimeout(() => { try { proc.kill('SIGKILL'); } catch (e) {} }, 2500);
+  proc.kill('SIGTERM');
+  // SIGTERM can hang if it's in the middle of audio
+  setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* gone */ } }, 2500);
   backendProc = null;
   setStatus('stopped');
   return { ok: true };
@@ -176,7 +162,7 @@ function stopBackend() {
 
 function restartBackend() {
   stopBackend();
-  setTimeout(startBackend, 600);   // let the mic device be released first
+  setTimeout(startBackend, 600);   // give the mic a moment to be released
   return { ok: true };
 }
 
@@ -186,78 +172,62 @@ ipcMain.handle('backend:restart', () => restartBackend());
 ipcMain.handle('backend:status', () => backendStatus);
 ipcMain.handle('logs:current', () => (currentLogPath ? path.basename(currentLogPath) : null));
 ipcMain.handle('logs:reveal', () => {
-  const { shell } = require('electron');
   fs.mkdirSync(LOG_DIR, { recursive: true });
-  // open the folder so the file can be grabbed and shared directly
   shell.openPath(LOG_DIR);
   return true;
 });
 
-// ---------------------------------------------------------------------------
-// Hot reload — edit code, see it live, no manual restarts
-//   * changing anything under ui/  reloads the window
-//   * changing any .py          restarts the backend process
-// Both are debounced, because editors emit several events per save.
-// ---------------------------------------------------------------------------
+// --- hot reload -----------------------------------------------------------------
+// Editing a file under ui/ reloads the window; editing any .py restarts the
+// backend. Debounced because editors fire several events per save.
+
+function debounce(fn, ms) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
+
+function watch(dir, options, onChange) {
+  if (!fs.existsSync(dir)) return;
+  try {
+    fs.watch(dir, options, (_evt, filename) => { if (filename) onChange(filename); });
+  } catch (e) {
+    console.warn(`watching ${dir} failed:`, e.message);
+  }
+}
 
 function watchForChanges() {
-  const debounce = (fn, ms) => {
-    let t = null;
-    return (...args) => {
-      clearTimeout(t);
-      t = setTimeout(() => fn(...args), ms);
-    };
-  };
-
-  // --- UI files -> reload the renderer ---
-  const reloadUI = debounce(() => {
+  const reloadWindow = debounce(() => {
     if (win && !win.isDestroyed()) {
       sendLog('[ui] reloading window (ui file changed)');
       win.reload();
     }
   }, 250);
 
-  try {
-    fs.watch(__dirname, { recursive: false }, (_evt, filename) => {
-      if (!filename) return;
-      if (/\.(js|html|css)$/.test(filename) && filename !== 'main.js' && filename !== 'preload.js') {
-        reloadUI();
-      }
-    });
-  } catch (e) {
-    console.warn('ui watch failed:', e.message);
-  }
-
-  // --- Python files -> restart the backend ---
-  const reloadBackend = debounce((file) => {
-    if (!backendProc) return;   // nothing running; nothing to restart
-    sendLog(`[ui] ${file} changed — restarting backend`);
+  const restartForPython = debounce((file) => {
+    if (!backendProc) return;
+    sendLog(`[ui] ${file} changed, restarting backend`);
     restartBackend();
   }, 600);
 
-  ['backend', 'brain', 'voice', 'connections'].forEach((dir) => {
-    const full = path.join(PROJECT_ROOT, dir);
-    if (!fs.existsSync(full)) return;
-    try {
-      fs.watch(full, { recursive: true }, (_evt, filename) => {
-        if (filename && filename.endsWith('.py')) reloadBackend(filename);
-      });
-    } catch (e) {
-      console.warn(`watch ${dir} failed:`, e.message);
-    }
+  // main.js and preload.js only load at startup, so reloading wouldn't help
+  watch(__dirname, { recursive: false }, (f) => {
+    if (/\.(js|html|css)$/.test(f) && f !== 'main.js' && f !== 'preload.js') reloadWindow();
   });
-
-  // config.py sits at the root, watched individually
-  try {
-    fs.watch(PROJECT_ROOT, { recursive: false }, (_evt, filename) => {
-      if (filename && filename.endsWith('.py')) reloadBackend(filename);
+  for (const dir of ['backend', 'brain', 'voice']) {
+    watch(path.join(PROJECT_ROOT, dir), { recursive: true }, (f) => {
+      if (f.endsWith('.py')) restartForPython(f);
     });
-  } catch (e) {
-    console.warn('root watch failed:', e.message);
   }
+  // config.py and main.py at the root
+  watch(PROJECT_ROOT, { recursive: false }, (f) => {
+    if (f.endsWith('.py')) restartForPython(f);
+  });
 }
 
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 
 function createWindow() {
   win = new BrowserWindow({
@@ -273,20 +243,18 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
     },
   });
-
   win.loadFile('index.html');
 }
 
 app.whenReady().then(() => {
   createWindow();
   watchForChanges();
-
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
-// make sure we never leave an orphaned python process behind
+// never leave an orphaned python process behind
 app.on('before-quit', () => { stopBackend(); });
 app.on('window-all-closed', () => {
   stopBackend();

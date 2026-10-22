@@ -36,7 +36,7 @@ SEVRIN (Self-Evolving Verified Reasoning Intelligence Nexus) runs on my MacBook.
 
 **Measure, then set thresholds.** Thresholds in `config.py` come from recordings, not guesses. Two examples:
 - The noise gate: my speech measured a band ratio of 0.44–0.66 against 0.24–0.29 for fan rumble, so the cut-off sits at 0.30.
-- Speaker verification: a threshold set from a *simulated* impostor cohort let friends' voices through in real use. `voice/calibrate_impostor.py` now sets it from recordings of real people.
+- Speaker verification: a threshold set from a *simulated* impostor cohort let friends' voices through in real use. `tools/calibrate_impostor.py` measures it from recordings of real people instead.
 
 ## What I'm measuring next
 
@@ -65,13 +65,27 @@ backend/service.py  ◄── WebSocket ws://localhost:8765 ──►  ui/ (Elec
 
 ```
 config.py        every tunable threshold, with the measurement behind it
-main.py          terminal-only entry point (voice, no app)
+main.py          terminal-only entry point (voice, no app), prints a latency breakdown per turn
 backend/         WebSocket service, proactive speech queue, reminder scheduler, time parsing
-brain/           Claude client, fact extraction and verification, SQLite store
+brain/           replies, prompts, fact extraction and verification, SQLite store
 voice/           wake word, noise gate, listener, STT (faster-whisper / whisper.cpp), TTS, barge-in
 voice/voice_id/  enrolment, ECAPA encoder, verification, impostor cohort
-ui/              Electron desktop app
+ui/              Electron app: renderer.js (wiring), hud.js (panels), reactor.js (the orb)
+tools/           mic diagnostics and calibration scripts (see below)
 ```
+
+## Tools
+
+These all use the real microphone and print every number they measure.
+
+| Script | What it's for |
+|---|---|
+| `tools/diagnose.py` | Noise-gate and speaker scores for my voice on my mic; suggests `config.py` values |
+| `tools/check_wake.py` | Runs the real wake path end to end. Run after any change under `voice/` |
+| `tools/calibrate_impostor.py` | Records me and another person and suggests a speaker threshold between us |
+| `tools/bench_stt.py` | whisper.cpp vs faster-whisper, text and timing, on my own sentences |
+
+Lint with `ruff check .` (config in `pyproject.toml`).
 
 ## Privacy
 
@@ -112,7 +126,7 @@ cd whisper.cpp && make -j
 Add `WHISPER_CPP_DIR=/full/path/to/whisper.cpp` to `.env`, then compare both engines on your own machine:
 
 ```bash
-python3 voice/test_whispercpp.py
+python3 tools/bench_stt.py
 ```
 
 If whisper.cpp isn't configured or fails to start, SEVRIN falls back to faster-whisper automatically.

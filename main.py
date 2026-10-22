@@ -1,139 +1,93 @@
-"""
-Run this. Ctrl+C to quit.
+"""Terminal-only SEVRIN: wake word, command, Claude, speech. No desktop app,
+no proactive speech. Prints a latency breakdown after every turn.
 
-Same pipeline as before, with timing instrumentation added so we can see
-exactly where time is going: record -> transcribe -> first Claude token ->
-first packet ready for TTS -> first audio actually playing.
+    python3 main.py      (Ctrl+C to quit)
 """
 import queue
 import threading
 import time
 
 import config
-from voice.wake_word import WakeWordListener
-from voice.listener import UtteranceListener
-from voice.stt import transcribe, get_model
 from brain.llm import ask_streaming_packets
-from voice.tts import prepare, play
+from voice import tts
+from voice.listener import UtteranceListener
+from voice.stt import get_model, transcribe
+from voice.wake_word import WakeWordListener
 
 
-def _fetch_worker(text_queue, audio_queue, timings):
-    first = True
+def _play(packets: queue.Queue, timings: dict):
     while True:
-        text = text_queue.get()
+        text = packets.get()
         if text is None:
-            audio_queue.put(None)
             break
-        try:
-            prepared = prepare(text)
-            if first:
-                timings["first_packet_prepared"] = time.time()
-                first = False
-        except Exception as e:
-            print(f"\n[tts error] {e}")
-            prepared = None
-        audio_queue.put(prepared)
+        timings.setdefault("first_audio", time.time())
+        tts.play(text)
 
 
-def _playback_worker(audio_queue, timings):
-    first = True
-    while True:
-        prepared = audio_queue.get()
-        if prepared is None:
-            break
-        if first:
-            timings["first_audio_start"] = time.time()
-            first = False
-        play(prepared)
+def _print_timings(t: dict):
+    print("\n[timing]")
+    print(f"  recording:                 {t['recorded'] - t['start']:.2f}s")
+    print(f"  transcription:             {t['transcribed'] - t['recorded']:.2f}s")
+    if "first_packet" in t:
+        print(f"  claude -> first packet:    {t['first_packet'] - t['transcribed']:.2f}s")
+    if "first_audio" in t:
+        print(f"  TOTAL to first audio:      {t['first_audio'] - t['start']:.2f}s")
+    print()
 
 
-def handle_turn(utterance_listener: UtteranceListener, max_seconds: float = None) -> bool:
-    timings = {}
-    timings["t0_start_recording"] = time.time()
-
+def handle_turn(listener: UtteranceListener, max_seconds: float = None) -> bool:
+    """One command and reply. Returns False if nothing was said."""
+    timings = {"start": time.time()}
     print("[listening] speak now...")
-    audio = utterance_listener.record_utterance(max_seconds=max_seconds)
-    timings["t1_recording_done"] = time.time()
+    audio = listener.record_utterance(max_seconds=max_seconds)
+    timings["recorded"] = time.time()
 
     print("[transcribing]...")
     text = transcribe(audio)
-    timings["t2_transcribed"] = time.time()
+    timings["transcribed"] = time.time()
     if not text:
         return False
 
     print(f"[you] {text}")
     print("[sevrin] ", end="", flush=True)
 
-    text_queue = queue.Queue()
-    audio_queue = queue.Queue()
-
-    fetch_thread = threading.Thread(target=_fetch_worker, args=(text_queue, audio_queue, timings), daemon=True)
-    playback_thread = threading.Thread(target=_playback_worker, args=(audio_queue, timings), daemon=True)
-    fetch_thread.start()
-    playback_thread.start()
-
-    first_token = True
+    packets = queue.Queue()
+    player = threading.Thread(target=_play, args=(packets, timings), daemon=True)
+    player.start()
     for packet in ask_streaming_packets(text):
-        if first_token:
-            timings["t3_first_packet_from_claude"] = time.time()
-            first_token = False
+        timings.setdefault("first_packet", time.time())
         print(packet, end=" ", flush=True)
-        text_queue.put(packet)
-
-    text_queue.put(None)
-    fetch_thread.join()
-    playback_thread.join()
+        packets.put(packet)
+    packets.put(None)
+    player.join()
     print()
 
-    # --- print the breakdown ---
-    t0 = timings["t0_start_recording"]
-    print("\n[timing]")
-    print(f"  recording:                 {timings['t1_recording_done'] - t0:.2f}s")
-    print(f"  transcription:              {timings['t2_transcribed'] - timings['t1_recording_done']:.2f}s")
-    if "t3_first_packet_from_claude" in timings:
-        print(f"  claude -> first packet:     {timings['t3_first_packet_from_claude'] - timings['t2_transcribed']:.2f}s")
-    if "first_packet_prepared" in timings:
-        print(f"  tts fetch (first packet):   {timings['first_packet_prepared'] - timings.get('t3_first_packet_from_claude', timings['t2_transcribed']):.2f}s")
-    if "first_audio_start" in timings:
-        print(f"  TOTAL to first audio:       {timings['first_audio_start'] - t0:.2f}s")
-    print()
-
+    _print_timings(timings)
     return True
 
 
 def main():
     print("[stt] loading whisper model...")
-    get_model()  # eager load — otherwise your first-ever transcription eats the model load time
+    get_model()     # load now, or the first command pays for it
 
-    utterance_listener = UtteranceListener()
+    listener = UtteranceListener()
     print("[stt] measuring room noise (stay quiet for a second)...")
-    utterance_listener.calibrate_noise()
+    listener.calibrate_noise()
 
     wake = WakeWordListener()
-    wake.set_noise_profile(utterance_listener.noise)
+    wake.set_noise_profile(listener.noise)
     wake.start()
 
     try:
         while True:
-            triggered_by = wake.listen_once()
-            print(f"\n[wake] triggered by '{triggered_by}'")
-
-            first_turn = True
-            while True:
-                # First command after waking gets the full recording window
-                # (you just said the wake word, give it a beat). Every turn
-                # after that only waits FOLLOWUP_WINDOW_SECONDS of silence
-                # before dropping back to wake-word listening.
-                timeout = config.MAX_UTTERANCE_SECONDS if first_turn else config.FOLLOWUP_WINDOW_SECONDS
-                first_turn = False
-                said_something = handle_turn(utterance_listener, max_seconds=timeout)
-                if not said_something:
-                    break
-
+            print(f"\n[wake] triggered by '{wake.listen_once()}'")
+            # the first command gets the full window; after that, going quiet for
+            # FOLLOWUP_WINDOW_SECONDS drops back to waiting for the wake word
+            timeout = config.MAX_UTTERANCE_SECONDS
+            while handle_turn(listener, max_seconds=timeout):
+                timeout = config.FOLLOWUP_WINDOW_SECONDS
     except KeyboardInterrupt:
         print("\n[sevrin] shutting down.")
-    finally:
-        wake.close()
 
 
 if __name__ == "__main__":

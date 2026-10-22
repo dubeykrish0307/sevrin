@@ -1,71 +1,45 @@
-"""
-SEVRIN — barge-in detection.
+"""Lets Krish talk over SEVRIN mid-sentence.
 
-Listens on the mic WHILE SEVRIN is speaking, so Krish can cut him off
-mid-sentence the way you'd interrupt a person.
+Listens on the mic while TTS plays. The mic also hears SEVRIN's own voice;
+instead of proper echo cancellation, anything heard has to pass speaker
+verification, and the TTS voice doesn't match the voiceprint. Works best on
+headphones; very loud speakers can still trip it.
 
-THE ECHO PROBLEM
-Listening during playback means the mic also picks up SEVRIN's own voice
-through the speakers. Naively, he'd interrupt himself constantly. Rather
-than implement acoustic echo cancellation (genuinely hard), we reuse the
-speaker verification that already exists: any speech detected during
-playback is checked against Krish's enrolled voiceprint. SEVRIN's TTS voice
-doesn't match it, so his own output is rejected automatically.
-
-Caveat worth knowing: this works best on headphones. On loud speakers, a
-strong echo can occasionally still trip the VAD, and very loud playback can
-mask a quiet interruption. If that becomes a problem in practice, the next
-step is a proper AEC layer — but voiceprint gating handles the common case
-without that complexity.
-
-Two thresholds matter:
-  - it must sound like speech (webrtcvad) for long enough to not be a cough
-  - it must sound like KRISH (resemblyzer) to count as a real interruption
+This is the strictest listener on purpose. Stopping mid-sentence for a fan
+is far more annoying than having to repeat yourself.
 """
 import collections
 import threading
 
-import numpy as np
 import webrtcvad
 
 import config
-from voice.voice_id.verify import verify as verify_speaker, voiceprint_available
-from voice.voice_id import verify as speaker_scores
-from voice import audio_gate
-from voice import audio_device
+from voice import audio_device, audio_gate
+from voice.voice_id import verify as speaker
 
 FRAME_MS = 30
 FRAME_SAMPLES = int(config.SAMPLE_RATE * FRAME_MS / 1000)
-
-# how much continuous speech before we treat it as a real interruption.
-# Too low and a cough stops him; too high and you have to shout over him.
-# Barge-in is the STRICTEST path in the system, deliberately. A false
-# interrupt is very annoying (SEVRIN stops mid-sentence for a fan), while a
-# missed one costs you only a repeat. So we demand more speech, a longer
-# verification clip, and maximum VAD aggressiveness here.
-SPEECH_FRAMES_TO_TRIGGER = 16         # ~480ms of sustained speech (was 240ms)
-VERIFY_CLIP_SECONDS = 1.8             # longer clip = far more reliable speaker check
-BARGE_VAD_AGGRESSIVENESS = 3          # most aggressive noise filtering
+SPEECH_FRAMES_TO_TRIGGER = 16       # ~480 ms of sustained speech, so a cough doesn't count
+VERIFY_CLIP_SECONDS = 1.8
+VAD_AGGRESSIVENESS = 3              # strictest setting
+# has to be clearly someone speaking up, so 4 dB more than the normal gate wants
+MIN_DB_ABOVE_FLOOR = audio_gate.NOISE_FLOOR_MARGIN_DB + 4
 
 
 class BargeInListener:
-    """Runs in a background thread during playback. Calls on_interrupt()
-    once, the moment a verified interruption from Krish is detected."""
+    """Watches the mic during playback and calls on_interrupt() once when a
+    verified interruption starts. Uses the shared PyAudio instance."""
 
     def __init__(self):
-        # NOTE: no PyAudio instance of its own. This class used to build one
-        # per turn and terminate it on close, which wedged CoreAudio into
-        # returning permanent silence. See voice/audio_device.py.
-        self.vad = webrtcvad.Vad(BARGE_VAD_AGGRESSIVENESS)
+        self.vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
         self.noise = audio_gate.NoiseProfile()
         self._thread = None
         self._stop = threading.Event()
-        self._voice_id = voiceprint_available()
-        self.captured_audio = b""     # audio of the interruption itself
+        self._verify = speaker.voiceprint_available()
+        self.captured_audio = b""       # the interruption itself, for transcription
 
     def set_noise_profile(self, profile):
-        """Reuse the noise floor already measured by the main listener rather
-        than re-calibrating (which would need the mic during playback)."""
+        """Can't calibrate while audio is playing, so take the listener's profile."""
         if profile is not None:
             self.noise = profile
 
@@ -88,10 +62,8 @@ class BargeInListener:
             print(f"[barge_in] couldn't open mic: {e}")
             return
 
-        ring_frames = int(config.SAMPLE_RATE * VERIFY_CLIP_SECONDS / FRAME_SAMPLES)
-        ring = collections.deque(maxlen=ring_frames)
+        ring = collections.deque(maxlen=int(config.SAMPLE_RATE * VERIFY_CLIP_SECONDS / FRAME_SAMPLES))
         speech_run = 0
-
         try:
             while not self._stop.is_set():
                 try:
@@ -104,41 +76,28 @@ class BargeInListener:
                     is_speech = self.vad.is_speech(frame, config.SAMPLE_RATE)
                 except Exception:
                     is_speech = False
-
                 if not is_speech:
                     speech_run = max(0, speech_run - 1)
                     continue
-
                 speech_run += 1
                 if speech_run < SPEECH_FRAMES_TO_TRIGGER:
                     continue
 
                 clip = b"".join(ring)
-
-                # physical gate — this is what stops a fan from interrupting.
-                # Barge-in demands MORE margin above the noise floor than the
-                # normal listener, since a false interrupt is so disruptive.
                 passed, detail = audio_gate.looks_like_speech(clip, self.noise)
-                if not passed:
-                    speech_run = 0
-                    continue
-                if detail.get("db_above_floor", 0) < audio_gate.NOISE_FLOOR_MARGIN_DB + 4:
-                    # loud-ish but not clearly someone speaking up
+                if not passed or detail.get("db_above_floor", 0) < MIN_DB_ABOVE_FLOOR:
                     speech_run = 0
                     continue
 
-                # Is this actually Krish, or SEVRIN's own voice echoing back?
-                if self._voice_id:
-                    ok, score, thr = verify_speaker(clip)
+                if self._verify:
+                    ok, score, thr = speaker.verify(clip)
                     if not ok:
-                        # SEVRIN's own output bleeding in, or another person —
-                        # either way, not an interruption we should honour
+                        # our own voice coming back through the speakers, or someone else
                         speech_run = 0
                         continue
-                    print(f"[barge_in] interruption from Krish "
-                          f"({speaker_scores.score_text(score)} >= {thr:.2f})")
+                    print(f"[barge_in] interruption from Krish ({speaker.score_text(score)} >= {thr:.2f})")
                 else:
-                    print("[barge_in] interruption detected (no voiceprint — can't verify speaker)")
+                    print("[barge_in] interruption detected (no voiceprint, can't verify speaker)")
 
                 self.captured_audio = clip
                 try:
@@ -151,7 +110,3 @@ class BargeInListener:
                 stream.close()
             except Exception:
                 pass
-
-    def close(self):
-        # Deliberately does NOT terminate the shared audio device.
-        self.stop()

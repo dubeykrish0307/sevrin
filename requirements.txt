@@ -1,4 +1,4 @@
-setuptools<82  # webrtcvad (via resemblyzer) still imports pkg_resources, which setuptools 82+ removed
+setuptools<82  # webrtcvad (via resemblyzer) still imports pkg_resources, which setuptools 82 removed
 websockets>=12.0
 openwakeword==0.6.0
 onnxruntime>=1.16.0
@@ -9,7 +9,6 @@ anthropic>=0.40.0
 python-dotenv==1.0.1
 requests==2.32.3
 numpy==1.26.4
-# ECAPA-TDNN speaker verification (~0.8% EER) — far stronger than
-# resemblyzer, which is kept only as an automatic fallback.
+# speaker verification: ECAPA-TDNN, with resemblyzer as the fallback
 speechbrain>=1.0.0
 resemblyzer==0.1.4

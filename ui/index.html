@@ -17,7 +17,7 @@
   <div class="app">
     <header class="chrome">
       <div class="wordmark">S E V R I N</div>
-      <div class="chrome-center" id="chromeCenter">
+      <div class="chrome-center">
         <span class="clock" id="clock">--:--:--</span>
       </div>
       <div class="status">
@@ -28,7 +28,7 @@
       </div>
     </header>
 
-    <!-- LEFT DRAWER: hidden by default, revealed on request or when relevant -->
+    <!-- side panels start hidden; hud.js slides them in when needed -->
     <aside class="hud-col hud-left">
       <div class="hud-panel panel-schedule hidden-panel">
         <div class="hud-panel-title">SCHEDULED</div>
@@ -40,14 +40,12 @@
       </div>
     </aside>
 
-    <!-- CENTER STAGE — always visible -->
     <main class="stage">
       <div id="orb-container"></div>
       <div class="speech-layer" id="speechLayer"></div>
       <div class="state-label" id="stateLabel">IDLE</div>
     </main>
 
-    <!-- RIGHT DRAWER: hidden by default, revealed on request or when relevant -->
     <aside class="hud-col hud-right">
       <div class="hud-panel panel-memory hidden-panel">
         <div class="hud-panel-title">MEMORY <span class="hud-count" id="memCount">0</span></div>
@@ -63,7 +61,6 @@
       </div>
     </aside>
 
-    <!-- BACKEND LOG — always visible, deliberately small and unobtrusive -->
     <aside class="log-console">
       <div class="log-console-title">LOG
         <span class="log-file" id="logFile"></span>

@@ -1,8 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-// Bridge between the sandboxed page and the Electron main process. The page
-// can't spawn processes itself (contextIsolation is on, which we want), so
-// backend control goes through here.
+// The page runs with contextIsolation and can't spawn processes, so backend
+// control and log access go through the main process.
 contextBridge.exposeInMainWorld('sevrin', {
   startBackend: () => ipcRenderer.invoke('backend:start'),
   stopBackend: () => ipcRenderer.invoke('backend:stop'),

@@ -3,8 +3,9 @@ venv/
 __pycache__/
 *.pyc
 .DS_Store
+.ruff_cache/
 
-# real biometric/voice data — stays local only
+# real voice data, stays on this machine
 voice/voice_id/recordings/
 voice/voice_id/profile/
 

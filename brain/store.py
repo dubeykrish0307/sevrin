@@ -1,21 +1,5 @@
-"""
-SEVRIN — persistent storage layer.
-
-SQLite lives in data/sevrin.db. Two things are stored here:
-
-  conversations  — every turn, so SEVRIN no longer forgets everything on
-                   restart (previously brain/llm.py kept history in a
-                   module-level list that died with the process).
-
-  facts          — durable things learned about Krish, kept SEPARATE from
-                   raw chat log. Facts carry a confidence score and a
-                   verification status, because a memory system that
-                   confidently stores wrong things is worse than one that
-                   stores nothing. See brain/extractor.py for how facts get
-                   proposed and verified before they land here.
-
-Plain sqlite3 from the stdlib — no ORM, no extra dependency.
-"""
+"""SQLite storage (data/sevrin.db): conversation turns, verified facts and
+scheduled reminders. Plain sqlite3, no ORM."""
 import json
 import os
 import sqlite3
@@ -25,233 +9,156 @@ import time
 DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 DB_PATH = os.path.join(DB_DIR, "sevrin.db")
 
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS conversations (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts         REAL NOT NULL,
+    role       TEXT NOT NULL,           -- 'user' | 'assistant'
+    content    TEXT NOT NULL,
+    session_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_conv_ts ON conversations(ts);
+
+CREATE TABLE IF NOT EXISTS facts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_ts    REAL NOT NULL,
+    updated_ts    REAL NOT NULL,
+    subject       TEXT NOT NULL,        -- e.g. 'tooling', 'schedule'
+    fact          TEXT NOT NULL,        -- one sentence
+    confidence    REAL NOT NULL,        -- 0..1 after verification
+    status        TEXT NOT NULL,        -- 'active' | 'superseded' | 'rejected'
+    source_turn   INTEGER,              -- conversations.id
+    evidence      TEXT,                 -- the quote that justified it
+    checks        TEXT,                 -- JSON, what each verification layer said
+    superseded_by INTEGER               -- facts.id of the replacement
+);
+CREATE INDEX IF NOT EXISTS idx_facts_status  ON facts(status);
+CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject);
+
+CREATE TABLE IF NOT EXISTS schedules (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_ts  REAL NOT NULL,
+    subject     TEXT NOT NULL,
+    next_due    REAL NOT NULL,          -- epoch seconds
+    recurrence  TEXT,                   -- JSON, NULL for one-off
+    status      TEXT NOT NULL,          -- 'active' | 'done' | 'cancelled'
+    last_fired  REAL,
+    source_text TEXT                    -- what was actually said, for debugging
+);
+CREATE INDEX IF NOT EXISTS idx_sched_due    ON schedules(next_due);
+CREATE INDEX IF NOT EXISTS idx_sched_status ON schedules(status);
+"""
+
 _local = threading.local()
 
 
 def _conn():
-    """One connection per thread — the backend runs the voice loop and the
-    websocket server on different threads, and sqlite connections are not
-    safe to share across them."""
+    # sqlite connections can't be shared across threads, and the voice loop,
+    # websocket server and scheduler all run on different ones
     if not hasattr(_local, "conn"):
         os.makedirs(DB_DIR, exist_ok=True)
-        _local.conn = sqlite3.connect(DB_PATH)
-        _local.conn.row_factory = sqlite3.Row
-        _init(_local.conn)
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(_SCHEMA)
+        conn.commit()
+        _local.conn = conn
     return _local.conn
 
 
-def _init(conn):
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS conversations (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts         REAL NOT NULL,
-        role       TEXT NOT NULL,           -- 'user' | 'assistant'
-        content    TEXT NOT NULL,
-        session_id TEXT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_conv_ts ON conversations(ts);
-
-    CREATE TABLE IF NOT EXISTS facts (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        created_ts   REAL NOT NULL,
-        updated_ts   REAL NOT NULL,
-        subject      TEXT NOT NULL,         -- what the fact is about, e.g. 'tooling', 'schedule'
-        fact         TEXT NOT NULL,         -- the fact itself, one clear sentence
-        confidence   REAL NOT NULL,         -- 0..1 after verification
-        status       TEXT NOT NULL,         -- 'active' | 'superseded' | 'rejected'
-        source_turn  INTEGER,               -- conversations.id it came from
-        evidence     TEXT,                  -- the quote/context that justified it
-        checks       TEXT,                  -- JSON: what each verification layer concluded
-        superseded_by INTEGER               -- facts.id that replaced this one
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_facts_status  ON facts(status);
-    CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject);
-
-    -- Scheduled items: reminders and recurring tasks. Persisted so they
-    -- survive a restart; the in-memory timers they replace silently lost
-    -- everything when the backend stopped.
-    CREATE TABLE IF NOT EXISTS schedules (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        created_ts  REAL NOT NULL,
-        subject     TEXT NOT NULL,        -- what to remind him about
-        next_due    REAL NOT NULL,        -- epoch seconds
-        recurrence  TEXT,                 -- JSON, NULL for one-shot
-        status      TEXT NOT NULL,        -- 'active' | 'done' | 'cancelled'
-        last_fired  REAL,
-        source_text TEXT                  -- what he actually said, for debugging
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_sched_due    ON schedules(next_due);
-    CREATE INDEX IF NOT EXISTS idx_sched_status ON schedules(status);
-    """)
+def _write(sql: str, params=()) -> int:
+    conn = _conn()
+    cur = conn.execute(sql, params)
     conn.commit()
-
-
-# ---------------- conversations ----------------
-
-def add_turn(role: str, content: str, session_id: str = None) -> int:
-    c = _conn()
-    cur = c.execute(
-        "INSERT INTO conversations (ts, role, content, session_id) VALUES (?, ?, ?, ?)",
-        (time.time(), role, content, session_id),
-    )
-    c.commit()
     return cur.lastrowid
 
 
+def _rows(sql: str, params=()):
+    return [dict(r) for r in _conn().execute(sql, params).fetchall()]
+
+
+# --- conversations ------------------------------------------------------------
+
+def add_turn(role: str, content: str, session_id: str = None) -> int:
+    return _write(
+        "INSERT INTO conversations (ts, role, content, session_id) VALUES (?, ?, ?, ?)",
+        (time.time(), role, content, session_id),
+    )
+
+
 def recent_turns(limit: int = 20):
-    """Most recent turns, oldest-first (ready to hand to the model)."""
-    c = _conn()
-    rows = c.execute(
-        "SELECT role, content FROM conversations ORDER BY id DESC LIMIT ?", (limit,)
-    ).fetchall()
-    return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+    """Last `limit` turns, oldest first, in the shape the Messages API wants."""
+    rows = _rows("SELECT role, content FROM conversations ORDER BY id DESC LIMIT ?", (limit,))
+    return list(reversed(rows))
 
 
-def search_turns(keyword: str, limit: int = 10):
-    c = _conn()
-    rows = c.execute(
-        "SELECT role, content, ts FROM conversations WHERE content LIKE ? ORDER BY id DESC LIMIT ?",
-        (f"%{keyword}%", limit),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-# ---------------- facts ----------------
+# --- facts --------------------------------------------------------------------
 
 def add_fact(subject: str, fact: str, confidence: float, evidence: str,
              checks: dict, source_turn: int = None) -> int:
     now = time.time()
-    c = _conn()
-    cur = c.execute(
+    return _write(
         """INSERT INTO facts
            (created_ts, updated_ts, subject, fact, confidence, status, source_turn, evidence, checks)
            VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)""",
         (now, now, subject, fact, confidence, source_turn, evidence, json.dumps(checks)),
     )
-    c.commit()
-    return cur.lastrowid
 
 
 def active_facts(limit: int = 200):
-    c = _conn()
-    rows = c.execute(
+    return _rows(
         "SELECT * FROM facts WHERE status = 'active' ORDER BY confidence DESC, updated_ts DESC LIMIT ?",
         (limit,),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def facts_about(subject: str):
-    c = _conn()
-    rows = c.execute(
-        "SELECT * FROM facts WHERE status = 'active' AND subject = ? ORDER BY confidence DESC",
-        (subject,),
-    ).fetchall()
-    return [dict(r) for r in rows]
+    )
 
 
 def supersede_fact(old_id: int, new_id: int):
-    """Marks a fact as replaced rather than deleting it — history is useful
-    when debugging why SEVRIN believes something."""
-    c = _conn()
-    c.execute(
+    # keep the old row so there's a history of what SEVRIN used to believe
+    _write(
         "UPDATE facts SET status = 'superseded', superseded_by = ?, updated_ts = ? WHERE id = ?",
         (new_id, time.time(), old_id),
     )
-    c.commit()
-
-
-def reject_fact(fact_id: int, reason: str = ""):
-    c = _conn()
-    row = c.execute("SELECT checks FROM facts WHERE id = ?", (fact_id,)).fetchone()
-    checks = json.loads(row["checks"]) if row and row["checks"] else {}
-    checks["rejected_reason"] = reason
-    c.execute(
-        "UPDATE facts SET status = 'rejected', updated_ts = ?, checks = ? WHERE id = ?",
-        (time.time(), json.dumps(checks), fact_id),
-    )
-    c.commit()
-
-
-def delete_fact(fact_id: int):
-    c = _conn()
-    c.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
-    c.commit()
 
 
 def stats():
-    c = _conn()
-    turns = c.execute("SELECT COUNT(*) n FROM conversations").fetchone()["n"]
-    facts = c.execute("SELECT COUNT(*) n FROM facts WHERE status='active'").fetchone()["n"]
+    conn = _conn()
+    turns = conn.execute("SELECT COUNT(*) n FROM conversations").fetchone()["n"]
+    facts = conn.execute("SELECT COUNT(*) n FROM facts WHERE status='active'").fetchone()["n"]
     return {"turns": turns, "active_facts": facts}
 
 
-# ---------------- schedules ----------------
+# --- schedules ----------------------------------------------------------------
 
 def add_schedule(subject: str, next_due: float, recurrence: dict = None,
                  source_text: str = None) -> int:
-    c = _conn()
-    cur = c.execute(
-        """INSERT INTO schedules
-           (created_ts, subject, next_due, recurrence, status, source_text)
+    return _write(
+        """INSERT INTO schedules (created_ts, subject, next_due, recurrence, status, source_text)
            VALUES (?, ?, ?, ?, 'active', ?)""",
-        (time.time(), subject, next_due,
-         json.dumps(recurrence) if recurrence else None, source_text),
+        (time.time(), subject, next_due, json.dumps(recurrence) if recurrence else None, source_text),
     )
-    c.commit()
-    return cur.lastrowid
 
 
 def due_schedules(now: float = None):
-    """Active schedules whose time has come."""
-    now = now if now is not None else time.time()
-    c = _conn()
-    rows = c.execute(
+    now = time.time() if now is None else now
+    return _rows(
         "SELECT * FROM schedules WHERE status = 'active' AND next_due <= ? ORDER BY next_due",
         (now,),
-    ).fetchall()
-    return [dict(r) for r in rows]
+    )
 
 
 def active_schedules():
-    c = _conn()
-    rows = c.execute(
-        "SELECT * FROM schedules WHERE status = 'active' ORDER BY next_due"
-    ).fetchall()
-    return [dict(r) for r in rows]
+    return _rows("SELECT * FROM schedules WHERE status = 'active' ORDER BY next_due")
 
 
 def next_due_time():
-    """When the soonest active schedule fires, or None. Lets the scheduler
-    sleep until exactly then instead of polling."""
-    c = _conn()
-    row = c.execute(
-        "SELECT MIN(next_due) AS t FROM schedules WHERE status = 'active'"
-    ).fetchone()
-    return row["t"] if row and row["t"] is not None else None
+    """Epoch time of the soonest active schedule, or None."""
+    row = _conn().execute("SELECT MIN(next_due) AS t FROM schedules WHERE status = 'active'").fetchone()
+    return row["t"]
 
 
 def mark_fired(schedule_id: int, next_due: float = None):
-    """Record a firing. Pass next_due to reschedule (recurring), omit to
-    close it out (one-shot)."""
-    c = _conn()
+    """Pass next_due to move a recurring schedule on; leave it out to close a one-off."""
     if next_due is None:
-        c.execute(
-            "UPDATE schedules SET status='done', last_fired=? WHERE id=?",
-            (time.time(), schedule_id),
-        )
+        _write("UPDATE schedules SET status='done', last_fired=? WHERE id=?", (time.time(), schedule_id))
     else:
-        c.execute(
-            "UPDATE schedules SET next_due=?, last_fired=? WHERE id=?",
-            (next_due, time.time(), schedule_id),
-        )
-    c.commit()
-
-
-def cancel_schedule(schedule_id: int):
-    c = _conn()
-    c.execute("UPDATE schedules SET status='cancelled' WHERE id=?", (schedule_id,))
-    c.commit()
+        _write("UPDATE schedules SET next_due=?, last_fired=? WHERE id=?",
+               (next_due, time.time(), schedule_id))

@@ -33,10 +33,7 @@ html, body {
     "left   input  right";
 }
 
-/* faint atmospheric wash + a very subtle grid, like a projected display */
-/* Background stays pure black — the blue wash and grid overlay are gone. */
-
-/* ---------- top chrome ---------- */
+/* ---------- top bar ---------- */
 .chrome {
   grid-area: chrome;
   display: flex; align-items: center; justify-content: space-between;
@@ -62,6 +59,29 @@ html, body {
 .status-dot.connected { background: var(--green); box-shadow: 0 0 9px var(--green); }
 .status-text { font-size: 10px; font-weight: 500; letter-spacing: 2px; color: var(--text-secondary); }
 
+.ctl-btn {
+  -webkit-app-region: no-drag;
+  background: rgba(20, 55, 85, 0.35);
+  border: 1px solid rgba(110, 231, 255, 0.35);
+  color: rgba(190, 235, 255, 0.9);
+  font-family: inherit;
+  font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%);
+  transition: background .2s, border-color .2s;
+}
+.ctl-btn:hover { background: rgba(30, 80, 120, 0.5); border-color: rgba(110, 231, 255, 0.6); }
+.ctl-btn:active { background: rgba(40, 100, 150, 0.6); }
+.ctl-btn.running { border-color: rgba(52, 211, 153, 0.5); color: rgba(180, 245, 220, 0.9); }
+.ctl-btn.starting { opacity: .6; }
+
+.ctl-state {
+  font-size: 9px; letter-spacing: 1.4px;
+  color: var(--text-secondary);
+  min-width: 52px;
+}
+
 /* ---------- HUD side columns ---------- */
 .hud-col {
   display: flex; flex-direction: column; gap: 14px;
@@ -74,15 +94,11 @@ html, body {
 .hud-panel {
   position: relative;
   padding: 12px 12px 12px 14px;
-  /* angled corner — the classic HUD bracket shape */
-  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%);
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%);  /* cut corner */
   background: linear-gradient(180deg, rgba(20,50,80,0.20), rgba(10,25,45,0.10));
   border-left: 1px solid rgba(110, 231, 255, 0.45);
   backdrop-filter: blur(14px) saturate(130%);
   -webkit-backdrop-filter: blur(14px) saturate(130%);
-  /* Reveal/hide transition — panels are hidden by default (see
-     .hidden-panel below) and slide in only when SEVRIN shows them or
-     something relevant happens, per the "mostly empty screen" design. */
   max-height: 420px;
   opacity: 1;
   transform: translateX(0);
@@ -91,11 +107,12 @@ html, body {
               transform .5s cubic-bezier(.4,0,.2,1),
               padding .5s ease, margin-bottom .5s ease, border-width .3s ease;
 }
+/* panels start hidden and slide in when shown (see hud.js) */
 .hud-panel.hidden-panel {
   max-height: 0;
   opacity: 0;
   padding-top: 0; padding-bottom: 0;
-  margin-bottom: -14px;   /* collapses the gap left by the flex `gap` too */
+  margin-bottom: -14px;   /* cancels the column gap */
   border-width: 0;
   pointer-events: none;
 }
@@ -114,8 +131,14 @@ html, body {
   color: rgba(110, 231, 255, 0.8);
   margin-bottom: 9px;
 }
+.hud-count {
+  float: right;
+  color: rgba(110, 231, 255, 0.55);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
 
-/* task rows */
+/* schedule */
 .hud-task { margin-bottom: 10px; }
 .hud-task:last-child { margin-bottom: 0; }
 .hud-task-row {
@@ -138,7 +161,7 @@ html, body {
   transition: width .6s ease;
 }
 
-/* meters */
+/* system meters */
 .hud-meter { margin-bottom: 8px; }
 .hud-meter-label {
   display: flex; justify-content: space-between;
@@ -169,7 +192,7 @@ html, body {
 .tag.warn { color: var(--amber); border: 1px solid rgba(255,184,77,0.45); }
 .tag.ok   { color: var(--green); border: 1px solid rgba(52,211,153,0.4); }
 
-/* telemetry rows */
+/* telemetry */
 .hud-tel-row {
   display: flex; justify-content: space-between;
   font-size: 9.5px; letter-spacing: .6px;
@@ -179,95 +202,7 @@ html, body {
 }
 .hud-tel-row span:first-child { color: var(--text-secondary); }
 
-/* ---------- center stage ---------- */
-.stage {
-  grid-area: stage;
-  position: relative;
-  display: flex; flex-direction: column;
-  align-items: center; justify-content: center;
-  z-index: 1;
-}
-#orb-container {
-  /* No mask here. The mask that used to fade these edges is what produced
-     the visible dark square around the reactor once the arcs swung wider.
-     The page background is pure black, and the WebGL canvas is transparent,
-     so nothing needs masking — the glow simply falls off into the black. */
-  width: 620px; height: 620px;
-  background: transparent; overflow: visible;
-}
-#orb-container canvas { display: block; background: transparent; }
-
-.state-label {
-  position: absolute; bottom: 6%;
-  font-size: 10px; font-weight: 500; letter-spacing: 5px;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-}
-
-/* ---------- floating speech (replaces the chat box) ---------- */
-.speech-layer {
-  position: absolute;
-  bottom: 14%;
-  width: min(680px, 76%);
-  display: flex; flex-direction: column;
-  align-items: center; gap: 8px;
-  pointer-events: none;
-}
-.speech-line {
-  font-size: 12.5px; line-height: 1.55; text-align: center;
-  letter-spacing: .2px;
-  opacity: 0;
-  transform: translateY(6px);
-  animation: speechIn .5s ease forwards;
-  text-shadow: 0 0 18px rgba(46, 158, 255, 0.35);
-}
-.speech-line.user {
-  font-size: 10.5px;
-  color: rgba(150, 200, 235, 0.62);
-  letter-spacing: 1px;
-}
-.speech-line.assistant { color: rgba(226, 245, 255, 0.95); }
-.speech-line.fading { animation: speechOut .8s ease forwards; }
-
-@keyframes speechIn {
-  from { opacity: 0; transform: translateY(6px); filter: blur(3px); }
-  to   { opacity: 1; transform: translateY(0);   filter: blur(0); }
-}
-@keyframes speechOut {
-  from { opacity: 1; transform: translateY(0); filter: blur(0); }
-  to   { opacity: 0; transform: translateY(-6px); filter: blur(3px); }
-}
-
-/* ---------- input ---------- */
-.input-bar {
-  grid-area: input;
-  display: flex; align-items: center; justify-content: center;
-  padding: 0 20px 18px; z-index: 2;
-}
-.input-bar input {
-  width: 100%; max-width: 460px;
-  padding: 10px 16px;
-  background: rgba(20, 45, 70, 0.22);
-  border: 1px solid var(--glass-border);
-  border-radius: 2px;
-  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%);
-  color: var(--text-primary);
-  font-size: 12.5px; letter-spacing: .5px;
-  outline: none;
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  text-align: center;
-}
-.input-bar input::placeholder { color: rgba(140,185,215,0.4); letter-spacing: 2px; font-size: 11px; }
-.input-bar input:focus { border-color: rgba(110, 231, 255, 0.5); background: rgba(25, 55, 85, 0.3); }
-
-/* ---------- memory panel ---------- */
-.hud-count {
-  float: right;
-  color: rgba(110, 231, 255, 0.55);
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-}
+/* memory */
 .hud-memory { display: flex; flex-direction: column; gap: 6px; }
 .mem-event {
   font-size: 9.5px; line-height: 1.4; letter-spacing: .2px;
@@ -295,34 +230,100 @@ html, body {
   to   { opacity: 1; transform: translateX(0); }
 }
 
-/* ---------- backend control + log ---------- */
-.ctl-btn {
-  -webkit-app-region: no-drag;
-  background: rgba(20, 55, 85, 0.35);
-  border: 1px solid rgba(110, 231, 255, 0.35);
-  color: rgba(190, 235, 255, 0.9);
-  font-family: inherit;
-  font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
-  padding: 5px 10px;
-  cursor: pointer;
-  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%);
-  transition: background .2s, border-color .2s;
+/* ---------- centre: orb and speech ---------- */
+.stage {
+  grid-area: stage;
+  position: relative;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  z-index: 1;
 }
-.ctl-btn:hover { background: rgba(30, 80, 120, 0.5); border-color: rgba(110, 231, 255, 0.6); }
-.ctl-btn:active { background: rgba(40, 100, 150, 0.6); }
-.ctl-btn.running { border-color: rgba(52, 211, 153, 0.5); color: rgba(180, 245, 220, 0.9); }
-.ctl-btn.starting { opacity: .6; }
+/* No mask: the canvas is transparent on a black page, so the glow just
+   falls off into black. A mask here showed up as a dark square. */
+#orb-container {
+  width: 620px; height: 620px;
+  background: transparent; overflow: visible;
+}
+#orb-container canvas { display: block; background: transparent; }
 
-.ctl-state {
-  font-size: 9px; letter-spacing: 1.4px;
+.state-label {
+  position: absolute; bottom: 6%;
+  font-size: 10px; font-weight: 500; letter-spacing: 5px;
   color: var(--text-secondary);
-  min-width: 52px;
+  text-transform: uppercase;
 }
 
-/* ---------- always-visible backend log console ---------- */
-/* Deliberately small and tucked away — it stays on screen per spec, but
-   the design goal is an empty stage, so this earns its space by being
-   unobtrusive rather than a full panel. */
+.speech-layer {
+  position: absolute;
+  bottom: 14%;
+  width: min(680px, 76%);
+  display: flex; flex-direction: column;
+  align-items: center; gap: 8px;
+  pointer-events: none;
+}
+.speech-line {
+  font-size: 12.5px; line-height: 1.55; text-align: center;
+  letter-spacing: .2px;
+  opacity: 0;
+  transform: translateY(6px);
+  animation: speechIn .5s ease forwards;
+  text-shadow: 0 0 18px rgba(46, 158, 255, 0.35);
+}
+.speech-line.user {
+  font-size: 10.5px;
+  color: rgba(150, 200, 235, 0.62);
+  letter-spacing: 1px;
+}
+.speech-line.assistant { color: rgba(226, 245, 255, 0.95); }
+.speech-line.fading { animation: speechOut .8s ease forwards; }
+/* said unprompted rather than in reply, labelled with its kind */
+.speech-line.proactive {
+  border-left: 2px solid var(--cyan);
+  padding-left: 10px;
+  text-align: left;
+}
+.speech-line.proactive::before {
+  content: attr(data-kind);
+  display: block;
+  font-size: 8px; font-weight: 700; letter-spacing: 1.8px;
+  color: rgba(110, 231, 255, 0.7);
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+
+@keyframes speechIn {
+  from { opacity: 0; transform: translateY(6px); filter: blur(3px); }
+  to   { opacity: 1; transform: translateY(0);   filter: blur(0); }
+}
+@keyframes speechOut {
+  from { opacity: 1; transform: translateY(0); filter: blur(0); }
+  to   { opacity: 0; transform: translateY(-6px); filter: blur(3px); }
+}
+
+/* ---------- text input ---------- */
+.input-bar {
+  grid-area: input;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 20px 18px; z-index: 2;
+}
+.input-bar input {
+  width: 100%; max-width: 460px;
+  padding: 10px 16px;
+  background: rgba(20, 45, 70, 0.22);
+  border: 1px solid var(--glass-border);
+  border-radius: 2px;
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%);
+  color: var(--text-primary);
+  font-size: 12.5px; letter-spacing: .5px;
+  outline: none;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  text-align: center;
+}
+.input-bar input::placeholder { color: rgba(140,185,215,0.4); letter-spacing: 2px; font-size: 11px; }
+.input-bar input:focus { border-color: rgba(110, 231, 255, 0.5); background: rgba(25, 55, 85, 0.3); }
+
+/* ---------- backend log, small on purpose (full history is in logs/) ---------- */
 .log-console {
   position: fixed;
   left: 18px; bottom: 74px;
@@ -348,7 +349,7 @@ html, body {
   text-align: left;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 90px;   /* small on purpose — full history is in logs/ on disk */
+  max-height: 90px;
 }
 .hud-log::-webkit-scrollbar { width: 3px; }
 .hud-log::-webkit-scrollbar-thumb { background: rgba(110,231,255,0.2); }
@@ -368,19 +369,3 @@ html, body {
   font-size: 10px; padding: 0 2px; line-height: 1;
 }
 .log-open:hover { color: rgba(150, 240, 255, 0.95); }
-
-/* Unprompted speech — visually distinct from a reply, so it's obvious
-   SEVRIN spoke on his own rather than answering something. */
-.speech-line.proactive {
-  border-left: 2px solid var(--cyan);
-  padding-left: 10px;
-  text-align: left;
-}
-.speech-line.proactive::before {
-  content: attr(data-kind);
-  display: block;
-  font-size: 8px; font-weight: 700; letter-spacing: 1.8px;
-  color: rgba(110, 231, 255, 0.7);
-  text-transform: uppercase;
-  margin-bottom: 3px;
-}
