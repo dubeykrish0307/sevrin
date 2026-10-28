@@ -38,6 +38,18 @@ SEVRIN (Self-Evolving Verified Reasoning Intelligence Nexus) runs on my MacBook.
 - The noise gate: my speech measured a band ratio of 0.44–0.66 against 0.24–0.29 for fan rumble, so the cut-off sits at 0.30.
 - Speaker verification: a threshold set from a *simulated* impostor cohort let friends' voices through in real use. `tools/calibrate_impostor.py` measures it from recordings of real people instead.
 
+## Numbers so far (35 logged test sessions)
+
+| What | Result |
+|---|---|
+| Wake word + voice check passed | 55 times, AS-norm z-score median 7.3 (threshold 3.0, lowest pass 3.55) |
+| Commands accepted as my voice | 61, median z 9.0 (lowest pass 3.05) |
+| Utterances rejected as "not Krish" | 50 (42 commands, 8 wake words); rejected commands had median z −2.1 |
+| Room noise floor measured at start-up | −75.7 to −43.6 dBFS, median −57.3 |
+| Enrolled voiceprint | 44–45 clips |
+
+These come from unlabelled session logs, so they show how far apart accepted and rejected scores sit, not a false-accept rate. Measuring that properly is on the list below.
+
 ## What I'm measuring next
 
 - [ ] Speech-to-text benchmark: word error rate and latency, faster-whisper vs whisper.cpp, on ~50 of my own commands
