@@ -16,3 +16,4 @@ ignore = ["B904", "B905"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["config", "backend", "brain", "voice"]
+
